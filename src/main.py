@@ -94,13 +94,22 @@ class SubtitleService:
             video_type = video.get('_video_type', 'legacy')
 
             # Extract CID based on video type
-            if video_type == 'embed':
+            if video_type == 'audio':
+                cid = video.get('audio_cid')
+            elif video_type == 'embed':
                 cid = video.get('manifest_cid')
             else:
                 filename = video.get('filename', '')
                 cid = filename.removeprefix('ipfs://') if filename else None
 
-            if not cid:
+            # For legacy videos, prefer video_v2 HLS manifest (480p) over full file
+            video_v2 = video.get('video_v2', '') if video_type == 'legacy' else ''
+            hls_cid = None
+            if video_v2:
+                # Format: ipfs://CID/manifest.m3u8
+                hls_cid = video_v2.removeprefix('ipfs://').removesuffix('/manifest.m3u8')
+
+            if not cid and not hls_cid:
                 logger.warning(f"Video {author}/{permlink} has no CID, skipping")
                 return False
 
@@ -113,14 +122,18 @@ class SubtitleService:
 
             logger.info(f"\n{'=' * 80}")
             logger.info(f"Processing: {author}/{permlink} [{video_type}]")
-            logger.info(f"CID: {cid}")
+            logger.info(f"CID: {hls_cid or cid}")
             logger.info(f"{'=' * 80}\n")
 
-            # Step 1: Download video
-            logger.info("Step 1/5: Downloading video from IPFS...")
+            # Step 1: Download video/audio
+            logger.info("Step 1/5: Downloading from IPFS...")
             if video_type == 'embed':
                 video_path = self.ipfs_fetcher.download_hls_video(cid, author, permlink)
+            elif hls_cid:
+                # Legacy with video_v2: use HLS (480p) instead of full file
+                video_path = self.ipfs_fetcher.download_hls_video(hls_cid, author, permlink)
             else:
+                # Legacy without video_v2, or audio: direct file download
                 video_path = self.ipfs_fetcher.download_video(cid, author, permlink)
             if not video_path:
                 logger.error("Failed to download video")
@@ -129,9 +142,10 @@ class SubtitleService:
             # Step 2: Transcribe (auto-falls back to English if detected language not in config)
             logger.info("Step 2/5: Transcribing audio...")
             configured_codes = {lang['code'] for lang in self.language_configs}
+            hotwords = self.db.get_hotwords()
             start_time = time.time()
             segments, detected_language = self.transcriber.transcribe(
-                video_path, allowed_languages=configured_codes
+                video_path, allowed_languages=configured_codes, hotwords=hotwords
             )
             transcription_time = time.time() - start_time
             logger.info(f"Transcription completed in {transcription_time:.1f}s")
@@ -140,6 +154,12 @@ class SubtitleService:
                 logger.error("No segments generated from transcription")
                 self.ipfs_fetcher.cleanup_video(video_path)
                 return False
+
+            # Apply text corrections (e.g. "p.d." -> "PeakD")
+            corrections = self.db.get_corrections()
+            if corrections:
+                segments = self.transcriber.apply_corrections(segments, corrections)
+                logger.info(f"Applied {len(corrections)} text corrections")
 
             # Get full transcript for tagging
             full_transcript = self.transcriber.get_transcript_text(segments)
@@ -225,7 +245,7 @@ class SubtitleService:
                         if self.enable_mongo_write and subtitle_cid:
                             self.db.save_subtitle(
                                 author, permlink, cid, lang_code, subtitle_cid,
-                                is_embed=(video_type == 'embed'),
+                                video_type=video_type,
                                 video_created_at=video.get('created') or video.get('createdAt'),
                             )
 
@@ -250,10 +270,12 @@ class SubtitleService:
             if self.config['processing']['cleanup_after_processing']:
                 self.ipfs_fetcher.cleanup_video(video_path)
 
-            # Record total processing time
+            # Record total processing time and video duration
             processing_seconds = round(time.time() - video_start)
+            video_duration_secs = round(segments[-1].end) if segments else 0
             if self.enable_mongo_write:
-                self.db.save_processing_time(author, permlink, processing_seconds)
+                self.db.save_processing_time(author, permlink, processing_seconds,
+                                             video_duration_seconds=video_duration_secs)
             logger.info(f"\n✓ Successfully processed {author}/{permlink} in {processing_seconds}s\n")
             return True
 
@@ -287,7 +309,9 @@ class SubtitleService:
 
                 if effective_start:
                     logger.info(f"Fetching videos since {effective_start}...")
-                    videos = self.db.get_videos_since(effective_start)
+                    videos = self.db.get_videos_since(
+                        effective_start, embed_start_date=self.start_date
+                    )
                 else:
                     logger.info("Fetching all videos with CIDs...")
                     videos = self.db.get_all_videos_with_cids()
@@ -296,9 +320,14 @@ class SubtitleService:
                 logger.info("No videos to process")
                 return
 
-            # Optionally prioritise embed videos over legacy
-            if self.config['processing'].get('prioritise_embed', False):
-                videos.sort(key=lambda v: (0 if v.get('_video_type') == 'embed' else 1))
+            # Sort priority: creators > embed > published legacy > scheduled > audio
+            priority_creators = self.db.get_priority_creators()
+            type_order = {'embed': 0, 'legacy': 1, 'audio': 2}
+            videos.sort(key=lambda v: (
+                0 if v.get('owner') in priority_creators else 1,
+                type_order.get(v.get('_video_type'), 2),
+                0 if v.get('status') == 'published' else 1,
+            ))
 
             logger.info(f"Found {len(videos)} videos to process")
 
@@ -310,23 +339,32 @@ class SubtitleService:
                 # Check for priority videos before each iteration
                 priority = self.db.get_priority_video()
                 while priority:
-                    logger.info(f"\n⚡ Processing PRIORITY video: {priority.get('owner')}/{priority.get('permlink')}")
-                    self.db.set_processing(
-                        priority.get('owner', 'unknown'),
-                        priority.get('permlink', 'unknown'),
-                        is_embed=(priority.get('_video_type') == 'embed'),
-                    )
-                    self.process_video(priority)
-                    self.db.clear_processing()
+                    p_owner = priority.get('owner', 'unknown')
+                    p_permlink = priority.get('permlink', 'unknown')
+                    if self.db.is_blacklisted(p_owner, p_permlink):
+                        logger.info(f"⛔ Skipping blacklisted priority video: {p_owner}/{p_permlink}")
+                    else:
+                        logger.info(f"\n⚡ Processing PRIORITY video: {p_owner}/{p_permlink}")
+                        self.db.set_processing(
+                            p_owner, p_permlink,
+                            video_type=priority.get('_video_type', 'legacy'),
+                        )
+                        self.process_video(priority)
+                        self.db.clear_processing()
                     time.sleep(2)
                     priority = self.db.get_priority_video()
 
                 logger.info(f"\nProcessing video {i}/{len(videos)}")
 
+                v_owner = video.get('owner', 'unknown')
+                v_permlink = video.get('permlink', 'unknown')
+                if self.db.is_blacklisted(v_owner, v_permlink):
+                    logger.info(f"⛔ Skipping blacklisted video: {v_owner}/{v_permlink}")
+                    continue
+
                 self.db.set_processing(
-                    video.get('owner', 'unknown'),
-                    video.get('permlink', 'unknown'),
-                    is_embed=(video.get('_video_type') == 'embed'),
+                    v_owner, v_permlink,
+                    video_type=video.get('_video_type', 'legacy'),
                 )
                 if self.process_video(video):
                     success_count += 1

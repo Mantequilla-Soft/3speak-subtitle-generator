@@ -28,8 +28,14 @@ subtitles_col = db[config['mongodb']['collection_subtitles']]
 tags_col = db[config['mongodb']['collection_tags']]
 videos_col = db[config['mongodb']['collection_videos']]
 embed_col = db[config['mongodb']['collection_embed']]
+embed_audio_col = db[config['mongodb'].get('collection_embed_audio', 'embed-audio')]
 priority_col = db[config['mongodb'].get('collection_priority', 'subtitles-priority')]
 status_col = db[config['mongodb'].get('collection_status', 'subtitles-status')]
+blacklist_col = db[config['mongodb'].get('collection_blacklist', 'subtitles-blacklist')]
+blacklist_authors_col = db[config['mongodb'].get('collection_blacklist_authors', 'subtitles-blacklist-authors')]
+priority_creators_col = db[config['mongodb'].get('collection_priority_creators', 'subtitles-priority-creators')]
+hotwords_col = db[config['mongodb'].get('collection_hotwords', 'subtitles-hotwords')]
+corrections_col = db[config['mongodb'].get('collection_corrections', 'subtitles-corrections')]
 
 REFRESH_INTERVAL = config.get('dashboard', {}).get('refresh_interval', 15)
 DASHBOARD_PASSWORD = config.get('dashboard', {}).get('password', '')
@@ -113,7 +119,7 @@ def get_stats():
     ]
     lang_counts = {doc['_id']: doc['count'] for doc in subtitles_col.aggregate(pipeline_langs)}
 
-    # Total videos matching our date filter (both collections)
+    # Total videos matching our date filter (all collections)
     legacy_query = {
         'filename': {'$exists': True, '$nin': [None, ''], '$regex': '^ipfs://'},
         'status': 'published'
@@ -122,21 +128,29 @@ def get_stats():
         'manifest_cid': {'$exists': True, '$nin': [None, '']},
         'status': 'published'
     }
+    audio_query = {
+        'audio_cid': {'$exists': True, '$nin': [None, '']},
+        'status': 'published'
+    }
     if START_DATE:
         legacy_query['created'] = {'$gte': START_DATE}
         embed_query['createdAt'] = {'$gte': START_DATE}
+        audio_query['createdAt'] = {'$gte': START_DATE}
 
     total_legacy = videos_col.count_documents(legacy_query)
     total_embed = embed_col.count_documents(embed_query)
-    total_available = total_legacy + total_embed
+    total_audio = embed_audio_col.count_documents(audio_query)
+    total_available = total_legacy + total_embed + total_audio
 
     # Processed counts by type
-    processed_embed = subtitles_col.count_documents({'isEmbed': True})
-    processed_legacy = total_processed - processed_embed
+    processed_audio = subtitles_col.count_documents({'isAudio': True})
+    processed_embed = subtitles_col.count_documents({'isEmbed': True, 'isAudio': {'$ne': True}})
+    processed_legacy = total_processed - processed_embed - processed_audio
 
     pending_legacy = max(0, total_legacy - processed_legacy)
     pending_embed = max(0, total_embed - processed_embed)
-    pending = pending_legacy + pending_embed
+    pending_audio = max(0, total_audio - processed_audio)
+    pending = pending_legacy + pending_embed + pending_audio
 
     # === Build unified recent activity list ===
     recent = []
@@ -148,6 +162,7 @@ def get_stats():
             'author': processing_doc['author'],
             'permlink': processing_doc['permlink'],
             'isEmbed': processing_doc.get('isEmbed', False),
+            'isAudio': processing_doc.get('isAudio', False),
             'state': 'processing',
             'languages': [],
             'lang_count': 0,
@@ -160,13 +175,17 @@ def get_stats():
     ).sort('requested_at', 1))
     prio_set = {(p['author'], p['permlink']) for p in prio_items}
     for item in prio_items:
-        is_embed = bool(embed_col.find_one(
+        is_audio = bool(embed_audio_col.find_one(
+            {'owner': item['author'], 'permlink': item['permlink']}, {'_id': 1}
+        ))
+        is_embed = is_audio or bool(embed_col.find_one(
             {'owner': item['author'], 'permlink': item['permlink']}, {'_id': 1}
         ))
         recent.append({
             'author': item['author'],
             'permlink': item['permlink'],
             'isEmbed': is_embed,
+            'isAudio': is_audio,
             'state': 'prioritized',
             'languages': [],
             'lang_count': 0,
@@ -178,7 +197,7 @@ def get_stats():
         {},
         {'author': 1, 'permlink': 1, 'subtitles': 1, 'isEmbed': 1,
          'created_at': 1, 'updated_at': 1, 'video_created_at': 1,
-         'processing_seconds': 1, '_id': 0}
+         'processing_seconds': 1, 'video_duration_seconds': 1, 'isAudio': 1, '_id': 0}
     ).sort('updated_at', -1).limit(15))
     for doc in completed_raw:
         doc['state'] = 'complete'
@@ -192,6 +211,10 @@ def get_stats():
         recent.append(doc)
 
     # 4. Recent pending videos (newest from source collections, not yet processed)
+    priority_creators = {
+        doc['author']
+        for doc in priority_creators_col.find({}, {'author': 1, '_id': 0})
+    }
     processing_pair = (
         (processing_doc['author'], processing_doc['permlink'])
         if processing_doc else None
@@ -204,17 +227,26 @@ def get_stats():
         embed_query,
         {'owner': 1, 'permlink': 1, 'createdAt': 1, '_id': 0}
     ).sort('createdAt', -1).limit(20))
+    audio_recent = list(embed_audio_col.find(
+        audio_query,
+        {'owner': 1, 'permlink': 1, 'createdAt': 1, '_id': 0}
+    ).sort('createdAt', -1).limit(20))
 
     source_candidates = []
     for v in legacy_recent:
         source_candidates.append({
             'author': v['owner'], 'permlink': v['permlink'],
-            'isEmbed': False, 'video_created_at': v.get('created'),
+            'isEmbed': False, 'isAudio': False, 'video_created_at': v.get('created'),
         })
     for v in embed_recent:
         source_candidates.append({
             'author': v['owner'], 'permlink': v['permlink'],
-            'isEmbed': True, 'video_created_at': v.get('createdAt'),
+            'isEmbed': True, 'isAudio': False, 'video_created_at': v.get('createdAt'),
+        })
+    for v in audio_recent:
+        source_candidates.append({
+            'author': v['owner'], 'permlink': v['permlink'],
+            'isEmbed': True, 'isAudio': True, 'video_created_at': v.get('createdAt'),
         })
     source_candidates.sort(
         key=lambda v: v.get('video_created_at') or datetime.min, reverse=True
@@ -238,7 +270,7 @@ def get_stats():
         pair = (sv['author'], sv['permlink'])
         if pair in processed_pairs or pair in prio_set or pair == processing_pair:
             continue
-        sv['state'] = 'pending'
+        sv['state'] = 'prioritized' if sv['author'] in priority_creators else 'pending'
         sv['languages'] = []
         sv['lang_count'] = 0
         sv['display_date'] = sv.get('video_created_at')
@@ -256,11 +288,14 @@ def get_stats():
         'total_available': total_available,
         'total_legacy': total_legacy,
         'total_embed': total_embed,
+        'total_audio': total_audio,
         'processed_legacy': processed_legacy,
         'processed_embed': processed_embed,
+        'processed_audio': processed_audio,
         'pending': pending,
         'pending_legacy': pending_legacy,
         'pending_embed': pending_embed,
+        'pending_audio': pending_audio,
         'start_date': start_date_str or 'all',
         'lang_counts': lang_counts,
         'recent': recent,
@@ -346,6 +381,295 @@ def api_priority_delete(item_id):
     if result.deleted_count:
         return jsonify({'ok': True})
     return jsonify({'error': 'Not found'}), 404
+
+
+# --- Blacklist endpoints ---
+
+@app.route('/api/blacklist', methods=['POST'])
+def api_blacklist_add():
+    data = request.get_json(silent=True) or {}
+    password = data.get('password', '')
+    video_ref = data.get('video', '').strip()
+
+    if not DASHBOARD_PASSWORD or password != DASHBOARD_PASSWORD:
+        return jsonify({'error': 'Invalid password'}), 403
+
+    if '/' not in video_ref:
+        return jsonify({'error': 'Format: author/permlink'}), 400
+
+    author, permlink = video_ref.split('/', 1)
+    if not author or not permlink:
+        return jsonify({'error': 'Format: author/permlink'}), 400
+
+    if blacklist_col.find_one({'author': author, 'permlink': permlink}):
+        return jsonify({'error': 'Already blacklisted'}), 409
+
+    blacklist_col.insert_one({
+        'author': author,
+        'permlink': permlink,
+        'added_at': datetime.now(),
+    })
+    logger.info(f"Blacklisted: {author}/{permlink}")
+    return jsonify({'ok': True, 'author': author, 'permlink': permlink})
+
+
+@app.route('/api/blacklist')
+def api_blacklist_list():
+    items = list(blacklist_col.find(
+        {}, {'author': 1, 'permlink': 1, 'added_at': 1, '_id': 1}
+    ).sort('added_at', -1))
+    for item in items:
+        item['_id'] = str(item['_id'])
+        if isinstance(item.get('added_at'), datetime):
+            item['added_at'] = item['added_at'].isoformat()
+    return jsonify(items)
+
+
+@app.route('/api/blacklist/<item_id>', methods=['DELETE'])
+def api_blacklist_delete(item_id):
+    from bson import ObjectId
+    password = request.args.get('password', '')
+    if not DASHBOARD_PASSWORD or password != DASHBOARD_PASSWORD:
+        return jsonify({'error': 'Invalid password'}), 403
+    result = blacklist_col.delete_one({'_id': ObjectId(item_id)})
+    if result.deleted_count:
+        return jsonify({'ok': True})
+    return jsonify({'error': 'Not found'}), 404
+
+
+# --- Blacklist Authors endpoints ---
+
+@app.route('/api/blacklist-authors', methods=['POST'])
+def api_blacklist_authors_add():
+    data = request.get_json(silent=True) or {}
+    password = data.get('password', '')
+    author = data.get('author', '').strip()
+
+    if not DASHBOARD_PASSWORD or password != DASHBOARD_PASSWORD:
+        return jsonify({'error': 'Invalid password'}), 403
+
+    if not author:
+        return jsonify({'error': 'Author is required'}), 400
+
+    if blacklist_authors_col.find_one({'author': author}):
+        return jsonify({'error': 'Author already blacklisted'}), 409
+
+    blacklist_authors_col.insert_one({
+        'author': author,
+        'added_at': datetime.now(),
+    })
+    logger.info(f"Blacklisted author: {author}")
+    return jsonify({'ok': True, 'author': author})
+
+
+@app.route('/api/blacklist-authors')
+def api_blacklist_authors_list():
+    items = list(blacklist_authors_col.find(
+        {}, {'author': 1, 'added_at': 1, '_id': 1}
+    ).sort('added_at', -1))
+    for item in items:
+        item['_id'] = str(item['_id'])
+        if isinstance(item.get('added_at'), datetime):
+            item['added_at'] = item['added_at'].isoformat()
+    return jsonify(items)
+
+
+@app.route('/api/blacklist-authors/<item_id>', methods=['DELETE'])
+def api_blacklist_authors_delete(item_id):
+    from bson import ObjectId
+    password = request.args.get('password', '')
+    if not DASHBOARD_PASSWORD or password != DASHBOARD_PASSWORD:
+        return jsonify({'error': 'Invalid password'}), 403
+    result = blacklist_authors_col.delete_one({'_id': ObjectId(item_id)})
+    if result.deleted_count:
+        return jsonify({'ok': True})
+    return jsonify({'error': 'Not found'}), 404
+
+
+# --- Priority Creators endpoints ---
+
+@app.route('/api/priority-creators', methods=['POST'])
+def api_priority_creators_add():
+    data = request.get_json(silent=True) or {}
+    password = data.get('password', '')
+    author = data.get('author', '').strip()
+
+    if not DASHBOARD_PASSWORD or password != DASHBOARD_PASSWORD:
+        return jsonify({'error': 'Invalid password'}), 403
+
+    if not author:
+        return jsonify({'error': 'Author is required'}), 400
+
+    if priority_creators_col.find_one({'author': author}):
+        return jsonify({'error': 'Author already prioritized'}), 409
+
+    priority_creators_col.insert_one({
+        'author': author,
+        'added_at': datetime.now(),
+    })
+    logger.info(f"Priority creator added: {author}")
+    return jsonify({'ok': True, 'author': author})
+
+
+@app.route('/api/priority-creators')
+def api_priority_creators_list():
+    items = list(priority_creators_col.find(
+        {}, {'author': 1, 'added_at': 1, '_id': 1}
+    ).sort('added_at', -1))
+    for item in items:
+        item['_id'] = str(item['_id'])
+        if isinstance(item.get('added_at'), datetime):
+            item['added_at'] = item['added_at'].isoformat()
+    return jsonify(items)
+
+
+@app.route('/api/priority-creators/<item_id>', methods=['DELETE'])
+def api_priority_creators_delete(item_id):
+    from bson import ObjectId
+    password = request.args.get('password', '')
+    if not DASHBOARD_PASSWORD or password != DASHBOARD_PASSWORD:
+        return jsonify({'error': 'Invalid password'}), 403
+    result = priority_creators_col.delete_one({'_id': ObjectId(item_id)})
+    if result.deleted_count:
+        return jsonify({'ok': True})
+    return jsonify({'error': 'Not found'}), 404
+
+
+# --- Hotwords endpoints ---
+
+@app.route('/api/hotwords', methods=['POST'])
+def api_hotwords_add():
+    data = request.get_json(silent=True) or {}
+    password = data.get('password', '')
+    word = data.get('word', '').strip()
+
+    if not DASHBOARD_PASSWORD or password != DASHBOARD_PASSWORD:
+        return jsonify({'error': 'Invalid password'}), 403
+
+    if not word:
+        return jsonify({'error': 'Word is required'}), 400
+
+    if hotwords_col.find_one({'word': word}):
+        return jsonify({'error': 'Word already exists'}), 409
+
+    hotwords_col.insert_one({
+        'word': word,
+        'added_at': datetime.now(),
+    })
+    logger.info(f"Hotword added: {word}")
+    return jsonify({'ok': True, 'word': word})
+
+
+@app.route('/api/hotwords')
+def api_hotwords_list():
+    items = list(hotwords_col.find(
+        {}, {'word': 1, 'added_at': 1, '_id': 1}
+    ).sort('added_at', -1))
+    for item in items:
+        item['_id'] = str(item['_id'])
+        if isinstance(item.get('added_at'), datetime):
+            item['added_at'] = item['added_at'].isoformat()
+    return jsonify(items)
+
+
+@app.route('/api/hotwords/<item_id>', methods=['DELETE'])
+def api_hotwords_delete(item_id):
+    from bson import ObjectId
+    password = request.args.get('password', '')
+    if not DASHBOARD_PASSWORD or password != DASHBOARD_PASSWORD:
+        return jsonify({'error': 'Invalid password'}), 403
+    result = hotwords_col.delete_one({'_id': ObjectId(item_id)})
+    if result.deleted_count:
+        return jsonify({'ok': True})
+    return jsonify({'error': 'Not found'}), 404
+
+
+# --- Corrections endpoints ---
+
+@app.route('/api/corrections', methods=['POST'])
+def api_corrections_add():
+    data = request.get_json(silent=True) or {}
+    password = data.get('password', '')
+    from_text = data.get('from', '').strip()
+    to_text = data.get('to', '').strip()
+
+    if not DASHBOARD_PASSWORD or password != DASHBOARD_PASSWORD:
+        return jsonify({'error': 'Invalid password'}), 403
+
+    if not from_text or not to_text:
+        return jsonify({'error': 'Both "from" and "to" are required'}), 400
+
+    if corrections_col.find_one({'from_text': from_text}):
+        return jsonify({'error': 'Correction already exists'}), 409
+
+    corrections_col.insert_one({
+        'from_text': from_text,
+        'to_text': to_text,
+        'added_at': datetime.now(),
+    })
+    logger.info(f"Correction added: {from_text} -> {to_text}")
+    return jsonify({'ok': True, 'from': from_text, 'to': to_text})
+
+
+@app.route('/api/corrections')
+def api_corrections_list():
+    items = list(corrections_col.find(
+        {}, {'from_text': 1, 'to_text': 1, 'added_at': 1, '_id': 1}
+    ).sort('added_at', -1))
+    for item in items:
+        item['_id'] = str(item['_id'])
+        if isinstance(item.get('added_at'), datetime):
+            item['added_at'] = item['added_at'].isoformat()
+    return jsonify(items)
+
+
+@app.route('/api/corrections/<item_id>', methods=['DELETE'])
+def api_corrections_delete(item_id):
+    from bson import ObjectId
+    password = request.args.get('password', '')
+    if not DASHBOARD_PASSWORD or password != DASHBOARD_PASSWORD:
+        return jsonify({'error': 'Invalid password'}), 403
+    result = corrections_col.delete_one({'_id': ObjectId(item_id)})
+    if result.deleted_count:
+        return jsonify({'ok': True})
+    return jsonify({'error': 'Not found'}), 404
+
+
+# --- Reprocess endpoint ---
+
+@app.route('/api/reprocess', methods=['POST'])
+def api_reprocess():
+    data = request.get_json(silent=True) or {}
+    password = data.get('password', '')
+    video_ref = data.get('video', '').strip()
+
+    if not DASHBOARD_PASSWORD or password != DASHBOARD_PASSWORD:
+        return jsonify({'error': 'Invalid password'}), 403
+
+    if '/' not in video_ref:
+        return jsonify({'error': 'Format: author/permlink'}), 400
+
+    author, permlink = video_ref.split('/', 1)
+    if not author or not permlink:
+        return jsonify({'error': 'Format: author/permlink'}), 400
+
+    # Delete existing subtitle document
+    result = subtitles_col.delete_one({'author': author, 'permlink': permlink})
+    deleted = result.deleted_count > 0
+
+    # Delete existing tags
+    tags_col.delete_one({'author': author, 'permlink': permlink})
+
+    # Add to priority queue (skip if already queued)
+    if not priority_col.find_one({'author': author, 'permlink': permlink}):
+        priority_col.insert_one({
+            'author': author,
+            'permlink': permlink,
+            'requested_at': datetime.now(),
+        })
+
+    logger.info(f"Reprocess requested: {author}/{permlink} (subtitles deleted: {deleted})")
+    return jsonify({'ok': True, 'author': author, 'permlink': permlink, 'deleted': deleted})
 
 
 if __name__ == '__main__':

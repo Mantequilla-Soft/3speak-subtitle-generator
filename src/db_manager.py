@@ -40,52 +40,82 @@ class DatabaseManager:
             self.db = self.client[self.config['database']]
             self.videos_collection = self.db[self.config['collection_videos']]
             self.embed_collection = self.db[self.config['collection_embed']]
+            self.embed_audio_collection = self.db[self.config.get('collection_embed_audio', 'embed-audio')]
             self.subtitles_collection = self.db[self.config['collection_subtitles']]
             self.tags_collection = self.db[self.config['collection_tags']]
             self.priority_collection = self.db[self.config.get('collection_priority', 'subtitles-priority')]
             self.status_collection = self.db[self.config.get('collection_status', 'subtitles-status')]
+            self.blacklist_collection = self.db[self.config.get('collection_blacklist', 'subtitles-blacklist')]
+            self.blacklist_authors_collection = self.db[self.config.get('collection_blacklist_authors', 'subtitles-blacklist-authors')]
+            self.priority_creators_collection = self.db[self.config.get('collection_priority_creators', 'subtitles-priority-creators')]
+            self.hotwords_collection = self.db[self.config.get('collection_hotwords', 'subtitles-hotwords')]
+            self.corrections_collection = self.db[self.config.get('collection_corrections', 'subtitles-corrections')]
 
             logger.info(f"Connected to MongoDB: {self.config['database']}")
         except errors.ServerSelectionTimeoutError as e:
             logger.error(f"Failed to connect to MongoDB: {e}")
             raise
 
-    def get_videos_since(self, start_date: datetime) -> List[Dict[str, Any]]:
+    def get_videos_since(self, start_date: datetime,
+                         embed_start_date: Optional[datetime] = None) -> List[Dict[str, Any]]:
         """
-        Fetch videos created on or after start_date from both collections.
+        Fetch videos created on or after start_date from all collections.
 
         Args:
-            start_date: Only return videos created on or after this datetime
+            start_date: Only return legacy videos created on or after this datetime
+                        (advances with the processing cursor)
+            embed_start_date: Only return embed/audio videos created on or after this
+                              datetime (defaults to start_date if not provided)
 
         Returns:
             List of video documents sorted by creation date ascending
         """
+        embed_since = embed_start_date or start_date
         try:
             # Legacy collection: uses 'created' field and 'filename' with ipfs:// prefix
+            has_cid = {'filename': {'$exists': True, '$nin': [None, ''], '$regex': '^ipfs://'}}
             legacy_query = {
                 'created': {'$gte': start_date},
-                'filename': {'$exists': True, '$nin': [None, ''], '$regex': '^ipfs://'},
-                'status': 'published'
+                **has_cid,
+                'status': 'published',
             }
-            legacy = list(self.videos_collection.find(legacy_query).sort('created', 1))
+            # Also pick up future-scheduled videos so subtitles are ready at publish time
+            scheduled_query = {
+                **has_cid,
+                'status': 'scheduled',
+                'publish_data': {'$gt': datetime.now()},
+            }
+            legacy = list(self.videos_collection.find(
+                {'$or': [legacy_query, scheduled_query]}
+            ).sort('created', 1))
             for v in legacy:
                 v['_video_type'] = 'legacy'
 
-            # Embed collection: uses 'createdAt' field and 'manifest_cid'
+            # Embed and audio use START_DATE (not the cursor) so they aren't
+            # skipped when the legacy cursor advances past them.
             embed_query = {
-                'createdAt': {'$gte': start_date},
+                'createdAt': {'$gte': embed_since},
                 'manifest_cid': {'$exists': True, '$nin': [None, '']},
-                'status': 'published'
+                'status': 'published',
             }
             embed = list(self.embed_collection.find(embed_query).sort('createdAt', 1))
             for v in embed:
                 v['_video_type'] = 'embed'
 
+            audio_query = {
+                'createdAt': {'$gte': embed_since},
+                'audio_cid': {'$exists': True, '$nin': [None, '']},
+                'status': 'published',
+            }
+            audio = list(self.embed_audio_collection.find(audio_query).sort('createdAt', 1))
+            for v in audio:
+                v['_video_type'] = 'audio'
+
             videos = sorted(
-                legacy + embed,
+                legacy + embed + audio,
                 key=lambda v: v.get('created') or v.get('createdAt') or datetime.min
             )
-            logger.info(f"Found {len(legacy)} legacy + {len(embed)} embed videos since {start_date.date()}")
+            logger.info(f"Found {len(legacy)} legacy (since {start_date.date()}) + {len(embed)} embed + {len(audio)} audio (since {embed_since.date()})")
             return videos
 
         except Exception as e:
@@ -100,11 +130,16 @@ class DatabaseManager:
             List of video documents sorted by creation date ascending
         """
         try:
-            legacy_query = {
-                'filename': {'$exists': True, '$nin': [None, ''], '$regex': '^ipfs://'},
-                'status': 'published'
+            has_cid = {'filename': {'$exists': True, '$nin': [None, ''], '$regex': '^ipfs://'}}
+            legacy_query = {**has_cid, 'status': 'published'}
+            scheduled_query = {
+                **has_cid,
+                'status': 'scheduled',
+                'publish_data': {'$gt': datetime.now()},
             }
-            legacy = list(self.videos_collection.find(legacy_query).sort('created', 1))
+            legacy = list(self.videos_collection.find(
+                {'$or': [legacy_query, scheduled_query]}
+            ).sort('created', 1))
             for v in legacy:
                 v['_video_type'] = 'legacy'
 
@@ -116,11 +151,19 @@ class DatabaseManager:
             for v in embed:
                 v['_video_type'] = 'embed'
 
+            audio_query = {
+                'audio_cid': {'$exists': True, '$nin': [None, '']},
+                'status': 'published'
+            }
+            audio = list(self.embed_audio_collection.find(audio_query).sort('createdAt', 1))
+            for v in audio:
+                v['_video_type'] = 'audio'
+
             videos = sorted(
-                legacy + embed,
+                legacy + embed + audio,
                 key=lambda v: v.get('created') or v.get('createdAt') or datetime.min
             )
-            logger.info(f"Found {len(legacy)} legacy + {len(embed)} embed videos with CIDs")
+            logger.info(f"Found {len(legacy)} legacy + {len(embed)} embed + {len(audio)} audio with CIDs")
             return videos
 
         except Exception as e:
@@ -128,7 +171,7 @@ class DatabaseManager:
             return []
 
     def get_video_by_owner_permlink(self, owner: str, permlink: str) -> Optional[Dict[str, Any]]:
-        """Fetch a single video by owner and permlink, checking both collections."""
+        """Fetch a single video by owner and permlink, checking all collections."""
         try:
             video = self.videos_collection.find_one({'owner': owner, 'permlink': permlink})
             if video:
@@ -137,6 +180,10 @@ class DatabaseManager:
             video = self.embed_collection.find_one({'owner': owner, 'permlink': permlink})
             if video:
                 video['_video_type'] = 'embed'
+                return video
+            video = self.embed_audio_collection.find_one({'owner': owner, 'permlink': permlink})
+            if video:
+                video['_video_type'] = 'audio'
             return video
         except Exception as e:
             logger.error(f"Error fetching video {owner}/{permlink}: {e}")
@@ -161,7 +208,7 @@ class DatabaseManager:
             logger.error(f"Error checking priority queue: {e}")
             return None
 
-    def set_processing(self, author: str, permlink: str, is_embed: bool = False):
+    def set_processing(self, author: str, permlink: str, video_type: str = 'legacy'):
         """Mark a video as currently being processed (single-document collection)."""
         try:
             self.status_collection.replace_one(
@@ -169,7 +216,8 @@ class DatabaseManager:
                 {
                     'author': author,
                     'permlink': permlink,
-                    'isEmbed': is_embed,
+                    'isEmbed': video_type in ('embed', 'audio'),
+                    'isAudio': video_type == 'audio',
                     'started_at': datetime.now(),
                 },
                 upsert=True,
@@ -183,6 +231,29 @@ class DatabaseManager:
             self.status_collection.delete_many({})
         except Exception as e:
             logger.error(f"Error clearing processing status: {e}")
+
+    def is_blacklisted(self, author: str, permlink: str) -> bool:
+        """Check if a video or its author is blacklisted."""
+        try:
+            if self.blacklist_authors_collection.find_one({'author': author}, {'_id': 1}):
+                return True
+            return bool(self.blacklist_collection.find_one(
+                {'author': author, 'permlink': permlink}, {'_id': 1}
+            ))
+        except Exception as e:
+            logger.error(f"Error checking blacklist: {e}")
+            return False
+
+    def get_priority_creators(self) -> set:
+        """Return the set of authors whose videos should be prioritized."""
+        try:
+            return {
+                doc['author']
+                for doc in self.priority_creators_collection.find({}, {'author': 1, '_id': 0})
+            }
+        except Exception as e:
+            logger.error(f"Error fetching priority creators: {e}")
+            return set()
 
     def get_last_processed_video_date(self) -> Optional[datetime]:
         """
@@ -227,7 +298,7 @@ class DatabaseManager:
 
     def save_subtitle(self, author: str, permlink: str, video_cid: str,
                      language: str, subtitle_cid: str,
-                     is_embed: bool = False,
+                     video_type: str = 'legacy',
                      video_created_at: Optional[datetime] = None) -> bool:
         """
         Save subtitle CID for a language to the video's subtitle document.
@@ -239,7 +310,7 @@ class DatabaseManager:
             video_cid: Video CID
             language: Subtitle language code
             subtitle_cid: IPFS CID of the subtitle file
-            is_embed: Whether the video comes from the embed collection
+            video_type: Source type ('legacy', 'embed', or 'audio')
             video_created_at: Original creation date of the video
 
         Returns:
@@ -247,7 +318,8 @@ class DatabaseManager:
         """
         try:
             set_on_insert = {
-                'isEmbed': is_embed,
+                'isEmbed': video_type in ('embed', 'audio'),
+                'isAudio': video_type == 'audio',
                 'created_at': datetime.now(),
             }
             if video_created_at:
@@ -272,12 +344,16 @@ class DatabaseManager:
             logger.error(f"Error saving subtitle: {e}")
             return False
 
-    def save_processing_time(self, author: str, permlink: str, seconds: int) -> bool:
-        """Save total processing time (in seconds) on the subtitle document."""
+    def save_processing_time(self, author: str, permlink: str, seconds: int,
+                            video_duration_seconds: int = 0) -> bool:
+        """Save total processing time and video duration on the subtitle document."""
         try:
+            update = {'processing_seconds': seconds}
+            if video_duration_seconds:
+                update['video_duration_seconds'] = video_duration_seconds
             self.subtitles_collection.update_one(
                 {'author': author, 'permlink': permlink},
-                {'$set': {'processing_seconds': seconds}},
+                {'$set': update},
             )
             return True
         except Exception as e:
@@ -320,6 +396,30 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Error saving tags: {e}")
             return False
+
+    def get_hotwords(self) -> List[str]:
+        """Return all hotwords for transcription prompting."""
+        try:
+            return [
+                doc['word']
+                for doc in self.hotwords_collection.find({}, {'word': 1, '_id': 0})
+            ]
+        except Exception as e:
+            logger.error(f"Error fetching hotwords: {e}")
+            return []
+
+    def get_corrections(self) -> List[Dict[str, str]]:
+        """Return all text corrections (from -> to pairs)."""
+        try:
+            return [
+                {'from': doc['from_text'], 'to': doc['to_text']}
+                for doc in self.corrections_collection.find(
+                    {}, {'from_text': 1, 'to_text': 1, '_id': 0}
+                )
+            ]
+        except Exception as e:
+            logger.error(f"Error fetching corrections: {e}")
+            return []
 
     def close(self):
         """Close database connection"""

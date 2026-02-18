@@ -3,7 +3,6 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="refresh" content="{{ refresh_interval }}">
     <title>3Speak Subtitles Dashboard</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -29,41 +28,35 @@
             font-size: 0.85rem;
             margin-top: 4px;
         }
-        .refresh-timer {
-            position: relative;
-            width: 40px;
-            height: 40px;
-            flex-shrink: 0;
-        }
-        .refresh-timer svg {
-            transform: rotate(-90deg);
-            width: 40px;
-            height: 40px;
-        }
-        .refresh-timer circle {
-            fill: none;
-            stroke-width: 3;
-        }
-        .refresh-timer .track { stroke: #21262d; }
-        .refresh-timer .progress {
-            stroke: #58a6ff;
-            stroke-dasharray: 113;
-            stroke-dashoffset: 0;
-            stroke-linecap: round;
-            animation: countdown {{ refresh_interval }}s linear forwards;
-        }
-        @keyframes countdown {
-            from { stroke-dashoffset: 0; }
-            to { stroke-dashoffset: 113; }
-        }
-        .refresh-timer .seconds {
-            position: absolute;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            font-size: 0.7rem;
-            font-weight: 700;
+        .refresh-btn {
+            background: #21262d;
+            border: 1px solid #30363d;
+            border-radius: 8px;
             color: #8b949e;
+            width: 40px;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            flex-shrink: 0;
+            transition: color 0.2s, border-color 0.2s;
+        }
+        .refresh-btn:hover {
+            color: #58a6ff;
+            border-color: #58a6ff;
+        }
+        .refresh-btn svg {
+            width: 20px;
+            height: 20px;
+            fill: currentColor;
+        }
+        .refresh-btn.spinning svg {
+            animation: spin 0.6s linear;
+        }
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
         }
         .cards {
             display: grid;
@@ -191,6 +184,11 @@
             color: #3fb950;
             border: 1px solid #3fb95044;
         }
+        .badge-audio {
+            background: #d2992222;
+            color: #d29922;
+            border: 1px solid #d2992244;
+        }
         .badge-complete {
             background: #3fb95022;
             color: #3fb950;
@@ -264,27 +262,6 @@
         .meter-fill.green { background: #3fb950; }
         .meter-fill.yellow { background: #d29922; }
         .meter-fill.red { background: #f85149; }
-        .priority-section {
-            display: flex;
-            gap: 24px;
-            margin-bottom: 32px;
-            flex-wrap: wrap;
-        }
-        .priority-form-box {
-            background: #161b22;
-            border: 1px solid #30363d;
-            border-radius: 8px;
-            padding: 20px;
-            flex: 1;
-            min-width: 300px;
-        }
-        .priority-form-box h2 {
-            font-size: 1.1rem;
-            margin-bottom: 12px;
-            color: #c9d1d9;
-            border-bottom: 1px solid #21262d;
-            padding-bottom: 8px;
-        }
         .priority-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; }
         .priority-form .field { display: flex; flex-direction: column; gap: 4px; }
         .priority-form .field label { font-size: 0.75rem; color: #8b949e; text-transform: uppercase; }
@@ -321,21 +298,6 @@
         }
         .priority-msg.ok { color: #3fb950; }
         .priority-msg.err { color: #f85149; }
-        .priority-queue-box {
-            background: #161b22;
-            border: 1px solid #30363d;
-            border-radius: 8px;
-            padding: 20px;
-            flex: 1;
-            min-width: 260px;
-        }
-        .priority-queue-box h2 {
-            font-size: 1.1rem;
-            margin-bottom: 12px;
-            color: #c9d1d9;
-            border-bottom: 1px solid #21262d;
-            padding-bottom: 8px;
-        }
         .queue-item {
             display: flex;
             justify-content: space-between;
@@ -345,6 +307,107 @@
             font-size: 0.85rem;
         }
         .queue-empty { color: #6e7681; font-size: 0.85rem; }
+        /* Tabbed management panels */
+        .mgmt-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+            margin-bottom: 32px;
+        }
+        @media (max-width: 900px) {
+            .mgmt-row { grid-template-columns: 1fr; }
+        }
+        .mgmt-panel {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .mgmt-tabs {
+            display: flex;
+            border-bottom: 1px solid #30363d;
+        }
+        .mgmt-tab {
+            flex: 1;
+            padding: 10px 16px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: #8b949e;
+            background: transparent;
+            border: none;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            transition: color 0.2s, border-color 0.2s;
+        }
+        .mgmt-tab:hover { color: #c9d1d9; }
+        .mgmt-tab.active {
+            color: #58a6ff;
+            border-bottom-color: #58a6ff;
+        }
+        .mgmt-tab.active-danger {
+            color: #f85149;
+            border-bottom-color: #f85149;
+        }
+        .mgmt-body {
+            padding: 16px 20px;
+        }
+        .mgmt-pane { display: none; }
+        .mgmt-pane.active { display: block; }
+        /* Admin login bar */
+        .admin-bar {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 12px 20px;
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .admin-bar .admin-label {
+            font-size: 0.8rem;
+            color: #8b949e;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-weight: 600;
+        }
+        .admin-bar input {
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            color: #e1e4e8;
+            padding: 6px 12px;
+            font-size: 0.85rem;
+            outline: none;
+            width: 180px;
+        }
+        .admin-bar input:focus { border-color: #58a6ff; }
+        .admin-bar .btn { padding: 6px 14px; }
+        .admin-bar .admin-status {
+            font-size: 0.8rem;
+            color: #3fb950;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .admin-bar .admin-status .dot {
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            background: #3fb950;
+            display: inline-block;
+        }
+        .btn-outline {
+            background: transparent;
+            border: 1px solid #30363d;
+            color: #8b949e;
+            border-radius: 6px;
+            padding: 6px 14px;
+            font-size: 0.8rem;
+            cursor: pointer;
+        }
+        .btn-outline:hover { border-color: #8b949e; color: #e1e4e8; }
     </style>
 </head>
 <body>
@@ -353,12 +416,22 @@
             <h1>3Speak Subtitles Dashboard</h1>
             <p class="subtitle">Videos since {{ start_date }} &middot; Last updated: {{ generated_at }}</p>
         </div>
-        <div class="refresh-timer">
-            <svg viewBox="0 0 40 40">
-                <circle class="track" cx="20" cy="20" r="18"/>
-                <circle class="progress" cx="20" cy="20" r="18"/>
-            </svg>
-            <span class="seconds" id="countdown">{{ refresh_interval }}</span>
+        <button class="refresh-btn" id="refreshBtn" onclick="refreshPage()" title="Refresh">
+            <svg viewBox="0 0 16 16"><path d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 1 1 .908-.418A6 6 0 1 1 8 2v1z"/><path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966a.25.25 0 0 1 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/></svg>
+        </button>
+    </div>
+
+    <div class="admin-bar" id="adminBar">
+        <span class="admin-label">Admin</span>
+        <div id="adminLoginForm">
+            <span style="display:inline-flex;gap:8px;align-items:center;">
+                <input type="password" id="adminPw" placeholder="password" onkeydown="if(event.key==='Enter')adminLogin()">
+                <button class="btn btn-sm" onclick="adminLogin()">Login</button>
+            </span>
+        </div>
+        <div id="adminLoggedIn" style="display:none;">
+            <span class="admin-status"><span class="dot"></span> Logged in</span>
+            <button class="btn-outline" style="margin-left:8px;" onclick="adminLogout()">Logout</button>
         </div>
     </div>
 
@@ -418,6 +491,11 @@
             <div class="label">Legacy Videos</div>
             <div class="detail">{{ processed_legacy }} done / {{ pending_legacy }} pending</div>
         </div>
+        <div class="card embed">
+            <div class="value">{{ total_audio }}</div>
+            <div class="label">Audio Clips</div>
+            <div class="detail">{{ processed_audio }} done / {{ pending_audio }} pending</div>
+        </div>
         <div class="card">
             <div class="value">{{ lang_counts|length }}</div>
             <div class="label">Languages</div>
@@ -445,6 +523,117 @@
         </div>
     </div>
 
+    <div class="mgmt-row">
+        <!-- Videos panel -->
+        <div class="mgmt-panel">
+            <div class="mgmt-tabs">
+                <button class="mgmt-tab active" onclick="switchTab(this, 'vid-prioritize')">Prioritize Video</button>
+                <button class="mgmt-tab" onclick="switchTab(this, 'vid-blacklist')">Blacklist Video</button>
+            </div>
+            <div class="mgmt-body">
+                <div id="vid-prioritize" class="mgmt-pane active">
+                    <div class="priority-form">
+                        <div class="field">
+                            <label>Author / Permlink</label>
+                            <input type="text" id="prioVideo" class="video-input" placeholder="author/permlink">
+                        </div>
+                        <button class="btn" onclick="submitPriority()">Prioritize</button>
+                    </div>
+                    <div class="priority-msg" id="prioMsg"></div>
+                    <div id="prioQueue" style="margin-top:12px"><span class="queue-empty">Loading...</span></div>
+                </div>
+                <div id="vid-blacklist" class="mgmt-pane">
+                    <div class="priority-form">
+                        <div class="field">
+                            <label>Author / Permlink</label>
+                            <input type="text" id="blVideo" class="video-input" placeholder="author/permlink">
+                        </div>
+                        <button class="btn btn-danger" onclick="submitBlacklist()">Blacklist</button>
+                    </div>
+                    <div class="priority-msg" id="blMsg"></div>
+                    <div id="blList" style="margin-top:12px"><span class="queue-empty">Loading...</span></div>
+                </div>
+            </div>
+        </div>
+        <!-- Creators panel -->
+        <div class="mgmt-panel">
+            <div class="mgmt-tabs">
+                <button class="mgmt-tab active" onclick="switchTab(this, 'cr-prioritize')">Prioritize Creator</button>
+                <button class="mgmt-tab" onclick="switchTab(this, 'cr-blacklist')">Blacklist Creator</button>
+            </div>
+            <div class="mgmt-body">
+                <div id="cr-prioritize" class="mgmt-pane active">
+                    <div class="priority-form">
+                        <div class="field">
+                            <label>Author</label>
+                            <input type="text" id="pcAuthor" class="video-input" placeholder="author">
+                        </div>
+                        <button class="btn" onclick="submitPriorityCreator()">Add Creator</button>
+                    </div>
+                    <div class="priority-msg" id="pcMsg"></div>
+                    <div id="pcList" style="margin-top:12px"><span class="queue-empty">Loading...</span></div>
+                </div>
+                <div id="cr-blacklist" class="mgmt-pane">
+                    <div class="priority-form">
+                        <div class="field">
+                            <label>Author</label>
+                            <input type="text" id="baAuthor" class="video-input" placeholder="author">
+                        </div>
+                        <button class="btn btn-danger" onclick="submitBlacklistAuthor()">Blacklist Author</button>
+                    </div>
+                    <div class="priority-msg" id="baMsg"></div>
+                    <div id="baList" style="margin-top:12px"><span class="queue-empty">Loading...</span></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Hotwords & Corrections panels -->
+    <div class="mgmt-row">
+        <div class="mgmt-panel">
+            <div class="mgmt-tabs">
+                <button class="mgmt-tab active" onclick="switchTab(this, 'hw-manage')">Hotwords</button>
+            </div>
+            <div class="mgmt-body">
+                <div id="hw-manage" class="mgmt-pane active">
+                    <p style="font-size:0.8rem; color:#6e7681; margin-bottom:12px;">Guide the transcription model to recognise platform-specific terms.</p>
+                    <div class="priority-form">
+                        <div class="field">
+                            <label>Word</label>
+                            <input type="text" id="hwWord" class="video-input" placeholder="e.g. Hive">
+                        </div>
+                        <button class="btn" onclick="submitHotword()">Add</button>
+                    </div>
+                    <div class="priority-msg" id="hwMsg"></div>
+                    <div id="hwList" style="margin-top:12px"><span class="queue-empty">Loading...</span></div>
+                </div>
+            </div>
+        </div>
+        <div class="mgmt-panel">
+            <div class="mgmt-tabs">
+                <button class="mgmt-tab active" onclick="switchTab(this, 'cr-manage')">Corrections</button>
+            </div>
+            <div class="mgmt-body">
+                <div id="cr-manage" class="mgmt-pane active">
+                    <p style="font-size:0.8rem; color:#6e7681; margin-bottom:12px;">Fix recurring transcription mistakes (e.g. "p.d." &rarr; "PeakD").</p>
+                    <div class="priority-form">
+                        <div class="field">
+                            <label>From</label>
+                            <input type="text" id="crFrom" style="width:140px;" placeholder="p.d.">
+                        </div>
+                        <div class="field">
+                            <label>To</label>
+                            <input type="text" id="crTo" style="width:140px;" placeholder="PeakD">
+                        </div>
+                        <button class="btn" onclick="submitCorrection()">Add</button>
+                    </div>
+                    <div class="priority-msg" id="crMsg"></div>
+                    <div id="crList" style="margin-top:12px"><span class="queue-empty">Loading...</span></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div class="section">
         <h2>Video Activity</h2>
         <table>
@@ -453,9 +642,11 @@
                     <th>Status</th>
                     <th>Video</th>
                     <th>Type</th>
+                    <th>Duration</th>
                     <th>Languages</th>
                     <th>Time</th>
                     <th>Date</th>
+                    <th></th>
                 </tr>
             </thead>
             <tbody>
@@ -474,10 +665,26 @@
                         </a>
                     </td>
                     <td>
-                        {% if doc.get('isEmbed') %}
+                        {% if doc.get('isAudio') %}
+                        <span class="badge badge-audio">audio</span>
+                        {% elif doc.get('isEmbed') %}
                         <span class="badge badge-embed">embed</span>
                         {% else %}
                         <span class="badge badge-legacy">legacy</span>
+                        {% endif %}
+                    </td>
+                    <td class="timestamp">
+                        {% if doc.video_duration_seconds is defined and doc.video_duration_seconds %}
+                            {% set dur = doc.video_duration_seconds %}
+                            {% if dur >= 3600 %}
+                                {{ (dur // 3600) }}h {{ ((dur % 3600) // 60) }}m
+                            {% elif dur >= 60 %}
+                                {{ (dur // 60) }}m {{ (dur % 60) }}s
+                            {% else %}
+                                {{ dur }}s
+                            {% endif %}
+                        {% else %}
+                            -
                         {% endif %}
                     </td>
                     <td>
@@ -508,43 +715,75 @@
                             -
                         {% endif %}
                     </td>
+                    <td>
+                        {% if doc.state == 'complete' %}
+                        <button class="btn btn-sm" style="background:#d29922;white-space:nowrap;" onclick="reprocessVideo('{{ doc.author }}/{{ doc.permlink }}', this)">Reprocess</button>
+                        {% endif %}
+                    </td>
                 </tr>
                 {% endfor %}
             </tbody>
         </table>
     </div>
 
-    <div class="priority-section">
-        <div class="priority-form-box">
-            <h2>Prioritize Video</h2>
-            <div class="priority-form">
-                <div class="field">
-                    <label>Author / Permlink</label>
-                    <input type="text" id="prioVideo" class="video-input" placeholder="author/permlink">
-                </div>
-                <div class="field">
-                    <label>Password</label>
-                    <input type="password" id="prioPw" class="pw-input" placeholder="password">
-                </div>
-                <button class="btn" onclick="submitPriority()">Prioritize</button>
-            </div>
-            <div class="priority-msg" id="prioMsg"></div>
-        </div>
-        <div class="priority-queue-box">
-            <h2>Priority Queue</h2>
-            <div id="prioQueue"><span class="queue-empty">Loading...</span></div>
-        </div>
-    </div>
-
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
     <script>
-        // Countdown timer
-        let seconds = {{ refresh_interval }};
-        const el = document.getElementById('countdown');
-        setInterval(() => {
-            seconds--;
-            if (seconds >= 0) el.textContent = seconds;
-        }, 1000);
+        // --- Admin session ---
+        function getAdminPw() { return sessionStorage.getItem('adminPw') || ''; }
+
+        function adminLogin() {
+            const pw = document.getElementById('adminPw').value;
+            if (!pw) return;
+            sessionStorage.setItem('adminPw', pw);
+            updateAdminUI();
+        }
+
+        function adminLogout() {
+            sessionStorage.removeItem('adminPw');
+            updateAdminUI();
+        }
+
+        function updateAdminUI() {
+            const loggedIn = !!getAdminPw();
+            document.getElementById('adminLoginForm').style.display = loggedIn ? 'none' : '';
+            document.getElementById('adminLoggedIn').style.display = loggedIn ? '' : 'none';
+        }
+
+        function requireAdmin(action) {
+            const pw = getAdminPw();
+            if (!pw) {
+                alert('Please log in as admin first.');
+                return null;
+            }
+            return pw;
+        }
+
+        // Restore session state on load
+        updateAdminUI();
+
+        // Tab switching
+        function switchTab(btn, paneId) {
+            const panel = btn.closest('.mgmt-panel');
+            panel.querySelectorAll('.mgmt-tab').forEach(t => {
+                t.classList.remove('active', 'active-danger');
+            });
+            panel.querySelectorAll('.mgmt-pane').forEach(p => p.classList.remove('active'));
+            const pane = document.getElementById(paneId);
+            pane.classList.add('active');
+            // Red highlight for blacklist tabs
+            if (paneId.includes('blacklist')) {
+                btn.classList.add('active-danger');
+            } else {
+                btn.classList.add('active');
+            }
+        }
+
+        // Refresh button
+        function refreshPage() {
+            const btn = document.getElementById('refreshBtn');
+            btn.classList.add('spinning');
+            setTimeout(() => location.reload(), 100);
+        }
 
         // Chart.js global defaults for dark theme
         Chart.defaults.color = '#8b949e';
@@ -619,9 +858,9 @@
 
         // Video Types donut
         makeDonut('typeChart',
-            ['Embed', 'Legacy'],
-            [{{ total_embed }}, {{ total_legacy }}],
-            ['#bc8cff', '#3fb950']
+            ['Embed', 'Legacy', 'Audio'],
+            [{{ total_embed }}, {{ total_legacy }}, {{ total_audio }}],
+            ['#bc8cff', '#3fb950', '#d29922']
         );
 
         // Progress donut
@@ -650,8 +889,9 @@
         loadQueue();
 
         function submitPriority() {
+            const pw = requireAdmin();
+            if (!pw) return;
             const video = document.getElementById('prioVideo').value.trim();
-            const pw = document.getElementById('prioPw').value;
             const msg = document.getElementById('prioMsg');
             msg.textContent = '';
             msg.className = 'priority-msg';
@@ -675,10 +915,298 @@
         }
 
         function removePriority(id) {
-            const pw = document.getElementById('prioPw').value;
+            const pw = requireAdmin();
+            if (!pw) return;
             fetch(`/api/priority/${id}?password=${encodeURIComponent(pw)}`, {method: 'DELETE'})
                 .then(r => r.json())
                 .then(() => loadQueue());
+        }
+
+        // Blacklist
+        function loadBlacklist() {
+            fetch('/api/blacklist').then(r => r.json()).then(items => {
+                const el = document.getElementById('blList');
+                if (!items.length) {
+                    el.innerHTML = '<span class="queue-empty">No blacklisted videos</span>';
+                    return;
+                }
+                el.innerHTML = items.map(item =>
+                    `<div class="queue-item">
+                        <span>${item.author}/${item.permlink}</span>
+                        <button class="btn btn-danger btn-sm" onclick="removeBlacklist('${item._id}')">Remove</button>
+                    </div>`
+                ).join('');
+            });
+        }
+        loadBlacklist();
+
+        function submitBlacklist() {
+            const pw = requireAdmin();
+            if (!pw) return;
+            const video = document.getElementById('blVideo').value.trim();
+            const msg = document.getElementById('blMsg');
+            msg.textContent = '';
+            msg.className = 'priority-msg';
+
+            fetch('/api/blacklist', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({video: video, password: pw})
+            }).then(r => r.json().then(d => ({status: r.status, data: d})))
+            .then(({status, data}) => {
+                if (status === 200) {
+                    msg.textContent = `Blacklisted ${data.author}/${data.permlink}`;
+                    msg.className = 'priority-msg ok';
+                    document.getElementById('blVideo').value = '';
+                    loadBlacklist();
+                } else {
+                    msg.textContent = data.error || 'Error';
+                    msg.className = 'priority-msg err';
+                }
+            });
+        }
+
+        function removeBlacklist(id) {
+            const pw = requireAdmin();
+            if (!pw) return;
+            fetch(`/api/blacklist/${id}?password=${encodeURIComponent(pw)}`, {method: 'DELETE'})
+                .then(r => r.json())
+                .then(() => loadBlacklist());
+        }
+
+        // Blacklist Authors
+        function loadBlacklistAuthors() {
+            fetch('/api/blacklist-authors').then(r => r.json()).then(items => {
+                const el = document.getElementById('baList');
+                if (!items.length) {
+                    el.innerHTML = '<span class="queue-empty">No blacklisted authors</span>';
+                    return;
+                }
+                el.innerHTML = items.map(item =>
+                    `<div class="queue-item">
+                        <span>${item.author}</span>
+                        <button class="btn btn-danger btn-sm" onclick="removeBlacklistAuthor('${item._id}')">Remove</button>
+                    </div>`
+                ).join('');
+            });
+        }
+        loadBlacklistAuthors();
+
+        function submitBlacklistAuthor() {
+            const pw = requireAdmin();
+            if (!pw) return;
+            const author = document.getElementById('baAuthor').value.trim();
+            const msg = document.getElementById('baMsg');
+            msg.textContent = '';
+            msg.className = 'priority-msg';
+
+            fetch('/api/blacklist-authors', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({author: author, password: pw})
+            }).then(r => r.json().then(d => ({status: r.status, data: d})))
+            .then(({status, data}) => {
+                if (status === 200) {
+                    msg.textContent = `Blacklisted author ${data.author}`;
+                    msg.className = 'priority-msg ok';
+                    document.getElementById('baAuthor').value = '';
+                    loadBlacklistAuthors();
+                } else {
+                    msg.textContent = data.error || 'Error';
+                    msg.className = 'priority-msg err';
+                }
+            });
+        }
+
+        function removeBlacklistAuthor(id) {
+            const pw = requireAdmin();
+            if (!pw) return;
+            fetch(`/api/blacklist-authors/${id}?password=${encodeURIComponent(pw)}`, {method: 'DELETE'})
+                .then(r => r.json())
+                .then(() => loadBlacklistAuthors());
+        }
+
+        // Priority Creators
+        function loadPriorityCreators() {
+            fetch('/api/priority-creators').then(r => r.json()).then(items => {
+                const el = document.getElementById('pcList');
+                if (!items.length) {
+                    el.innerHTML = '<span class="queue-empty">No priority creators</span>';
+                    return;
+                }
+                el.innerHTML = items.map(item =>
+                    `<div class="queue-item">
+                        <span>${item.author}</span>
+                        <button class="btn btn-danger btn-sm" onclick="removePriorityCreator('${item._id}')">Remove</button>
+                    </div>`
+                ).join('');
+            });
+        }
+        loadPriorityCreators();
+
+        function submitPriorityCreator() {
+            const pw = requireAdmin();
+            if (!pw) return;
+            const author = document.getElementById('pcAuthor').value.trim();
+            const msg = document.getElementById('pcMsg');
+            msg.textContent = '';
+            msg.className = 'priority-msg';
+
+            fetch('/api/priority-creators', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({author: author, password: pw})
+            }).then(r => r.json().then(d => ({status: r.status, data: d})))
+            .then(({status, data}) => {
+                if (status === 200) {
+                    msg.textContent = `Added ${data.author} as priority creator`;
+                    msg.className = 'priority-msg ok';
+                    document.getElementById('pcAuthor').value = '';
+                    loadPriorityCreators();
+                } else {
+                    msg.textContent = data.error || 'Error';
+                    msg.className = 'priority-msg err';
+                }
+            });
+        }
+
+        function removePriorityCreator(id) {
+            const pw = requireAdmin();
+            if (!pw) return;
+            fetch(`/api/priority-creators/${id}?password=${encodeURIComponent(pw)}`, {method: 'DELETE'})
+                .then(r => r.json())
+                .then(() => loadPriorityCreators());
+        }
+
+        // Hotwords
+        function loadHotwords() {
+            fetch('/api/hotwords').then(r => r.json()).then(items => {
+                const el = document.getElementById('hwList');
+                if (!items.length) {
+                    el.innerHTML = '<span class="queue-empty">No hotwords configured</span>';
+                    return;
+                }
+                el.innerHTML = '<div style="display:flex;flex-wrap:wrap;gap:8px;">' + items.map(item =>
+                    `<span class="lang-pill" style="cursor:pointer;display:inline-flex;align-items:center;gap:4px;" title="Click to remove">
+                        ${item.word}
+                        <span style="opacity:0.5;font-size:0.7rem;" onclick="removeHotword('${item._id}')">&times;</span>
+                    </span>`
+                ).join('') + '</div>';
+            });
+        }
+        loadHotwords();
+
+        function submitHotword() {
+            const pw = requireAdmin();
+            if (!pw) return;
+            const word = document.getElementById('hwWord').value.trim();
+            const msg = document.getElementById('hwMsg');
+            msg.textContent = '';
+            msg.className = 'priority-msg';
+
+            fetch('/api/hotwords', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({word: word, password: pw})
+            }).then(r => r.json().then(d => ({status: r.status, data: d})))
+            .then(({status, data}) => {
+                if (status === 200) {
+                    msg.textContent = `Added hotword: ${data.word}`;
+                    msg.className = 'priority-msg ok';
+                    document.getElementById('hwWord').value = '';
+                    loadHotwords();
+                } else {
+                    msg.textContent = data.error || 'Error';
+                    msg.className = 'priority-msg err';
+                }
+            });
+        }
+
+        function removeHotword(id) {
+            const pw = requireAdmin();
+            if (!pw) return;
+            fetch(`/api/hotwords/${id}?password=${encodeURIComponent(pw)}`, {method: 'DELETE'})
+                .then(r => r.json())
+                .then(() => loadHotwords());
+        }
+
+        // Corrections
+        function loadCorrections() {
+            fetch('/api/corrections').then(r => r.json()).then(items => {
+                const el = document.getElementById('crList');
+                if (!items.length) {
+                    el.innerHTML = '<span class="queue-empty">No corrections configured</span>';
+                    return;
+                }
+                el.innerHTML = '<div style="display:flex;flex-wrap:wrap;gap:8px;">' + items.map(item =>
+                    `<span class="lang-pill" style="cursor:pointer;display:inline-flex;align-items:center;gap:4px;" title="Click to remove">
+                        ${item.from_text} &rarr; ${item.to_text}
+                        <span style="opacity:0.5;font-size:0.7rem;" onclick="removeCorrection('${item._id}')">&times;</span>
+                    </span>`
+                ).join('') + '</div>';
+            });
+        }
+        loadCorrections();
+
+        function submitCorrection() {
+            const pw = requireAdmin();
+            if (!pw) return;
+            const from = document.getElementById('crFrom').value.trim();
+            const to = document.getElementById('crTo').value.trim();
+            const msg = document.getElementById('crMsg');
+            msg.textContent = '';
+            msg.className = 'priority-msg';
+
+            fetch('/api/corrections', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({from: from, to: to, password: pw})
+            }).then(r => r.json().then(d => ({status: r.status, data: d})))
+            .then(({status, data}) => {
+                if (status === 200) {
+                    msg.textContent = `Added: ${data.from} \u2192 ${data.to}`;
+                    msg.className = 'priority-msg ok';
+                    document.getElementById('crFrom').value = '';
+                    document.getElementById('crTo').value = '';
+                    loadCorrections();
+                } else {
+                    msg.textContent = data.error || 'Error';
+                    msg.className = 'priority-msg err';
+                }
+            });
+        }
+
+        function removeCorrection(id) {
+            const pw = requireAdmin();
+            if (!pw) return;
+            fetch(`/api/corrections/${id}?password=${encodeURIComponent(pw)}`, {method: 'DELETE'})
+                .then(r => r.json())
+                .then(() => loadCorrections());
+        }
+
+        // Reprocess
+        function reprocessVideo(ref, btn) {
+            const pw = requireAdmin();
+            if (!pw) return;
+            btn.disabled = true;
+            btn.textContent = '...';
+            fetch('/api/reprocess', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({video: ref, password: pw})
+            }).then(r => r.json().then(d => ({status: r.status, data: d})))
+            .then(({status, data}) => {
+                if (status === 200) {
+                    btn.textContent = 'Queued';
+                    btn.style.background = '#3fb950';
+                    setTimeout(() => location.reload(), 1500);
+                } else {
+                    btn.textContent = 'Error';
+                    btn.style.background = '#f85149';
+                    alert(data.error || 'Failed');
+                    setTimeout(() => { btn.textContent = 'Reprocess'; btn.style.background = '#d29922'; btn.disabled = false; }, 2000);
+                }
+            });
         }
     </script>
 </body>

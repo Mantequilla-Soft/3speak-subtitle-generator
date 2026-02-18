@@ -1,11 +1,12 @@
 """
 Whisper Transcriber
-Handles speech-to-text transcription using faster-whisper
+Handles speech-to-text transcription using faster-whisper with batched inference
 """
 
+import re
 import logging
 from typing import List, Dict, Any, Optional
-from faster_whisper import WhisperModel
+from faster_whisper import WhisperModel, BatchedInferencePipeline
 
 logger = logging.getLogger(__name__)
 
@@ -29,25 +30,29 @@ class Transcriber:
         """Initialize Whisper model"""
         self.config = config['models']['whisper']
         self.model = None
+        self.pipeline = None
         self._load_model()
 
     def _load_model(self):
-        """Load Whisper model"""
+        """Load Whisper model with batched inference pipeline"""
         try:
-            logger.info(f"Loading Whisper model: {self.config['model_size']}")
+            model_size = self.config['model_size']
+            logger.info(f"Loading Whisper model: {model_size}")
             self.model = WhisperModel(
-                self.config['model_size'],
+                model_size,
                 device=self.config['device'],
                 compute_type=self.config['compute_type'],
                 download_root="/app/models"
             )
-            logger.info("Whisper model loaded successfully")
+            self.pipeline = BatchedInferencePipeline(model=self.model)
+            logger.info(f"Whisper model loaded with batched inference pipeline")
         except Exception as e:
             logger.error(f"Failed to load Whisper model: {e}")
             raise
 
     def transcribe(self, video_path: str, language: str = None,
-                   allowed_languages: set = None) -> tuple[List[Segment], str]:
+                   allowed_languages: set = None,
+                   hotwords: List[str] = None) -> tuple[List[Segment], str]:
         """
         Transcribe video audio to text with timestamps
 
@@ -56,6 +61,7 @@ class Transcriber:
             language: Force transcription in this language (ISO 639-1), or None for auto-detect
             allowed_languages: Set of configured language codes; if detected language
                                is not in this set, re-run forced as English
+            hotwords: Platform-specific words to prime the model with
 
         Returns:
             Tuple of (list of segments, detected language)
@@ -64,16 +70,24 @@ class Transcriber:
             logger.info(f"Starting transcription: {video_path}"
                         + (f" (forced language: {language})" if language else ""))
 
-            # Transcribe with faster-whisper
+            beam_size = self.config.get('beam_size', 3)
+            batch_size = self.config.get('batch_size', 16)
+
             transcribe_kwargs = dict(
-                beam_size=5,
-                vad_filter=True,
-                vad_parameters=dict(min_silence_duration_ms=500),
+                beam_size=beam_size,
+                batch_size=batch_size,
+                word_timestamps=True,
             )
             if language:
                 transcribe_kwargs['language'] = language
 
-            segments_iterator, info = self.model.transcribe(
+            # Prime model with platform-specific vocabulary
+            if hotwords:
+                transcribe_kwargs['initial_prompt'] = ', '.join(hotwords)
+                transcribe_kwargs['hotwords'] = ', '.join(hotwords)
+                logger.info(f"Using {len(hotwords)} hotwords for transcription")
+
+            segments_iterator, info = self.pipeline.transcribe(
                 video_path, **transcribe_kwargs
             )
 
@@ -82,20 +96,23 @@ class Transcriber:
                         f" (probability: {info.language_probability:.2f})")
 
             # If detected language isn't in our config, restart as English
-            # (checks before consuming the iterator, so no wasted work)
             if not language and allowed_languages and detected_language not in allowed_languages:
                 logger.warning(f"Detected '{detected_language}' not in config, re-transcribing as English")
-                return self.transcribe(video_path, language='en')
+                return self.transcribe(video_path, language='en', hotwords=hotwords)
 
-            # Convert to Segment objects
+            # Collect raw segments, then split long ones using word timestamps
+            max_words = self.config.get('max_words_per_segment', 8)
             segments = []
             for segment in segments_iterator:
-                seg = Segment(
-                    start=segment.start,
-                    end=segment.end,
-                    text=segment.text
-                )
-                segments.append(seg)
+                words = segment.words if segment.words else []
+                if len(words) > max_words:
+                    segments.extend(self._split_segment(words, max_words))
+                else:
+                    segments.append(Segment(
+                        start=segment.start,
+                        end=segment.end,
+                        text=segment.text,
+                    ))
 
             logger.info(f"Transcription complete: {len(segments)} segments")
             return segments, detected_language
@@ -103,6 +120,63 @@ class Transcriber:
         except Exception as e:
             logger.error(f"Transcription failed: {e}")
             raise
+
+    @staticmethod
+    def _split_segment(words, max_words: int) -> List['Segment']:
+        """Split a list of Word objects into shorter Segments.
+
+        Tries to break at sentence-ending punctuation (.!?) first,
+        then at clause punctuation (,;:), then at the word limit.
+        """
+        SENTENCE_END = re.compile(r'[.!?]$')
+        CLAUSE_BREAK = re.compile(r'[,;:]$')
+
+        segments = []
+        buf = []
+
+        def flush():
+            if not buf:
+                return
+            text = ''.join(w.word for w in buf).strip()
+            if text:
+                segments.append(Segment(
+                    start=buf[0].start,
+                    end=buf[-1].end,
+                    text=text,
+                ))
+            buf.clear()
+
+        for word in words:
+            buf.append(word)
+
+            at_limit = len(buf) >= max_words
+            word_text = word.word.strip()
+
+            if SENTENCE_END.search(word_text):
+                flush()
+            elif at_limit and CLAUSE_BREAK.search(word_text):
+                flush()
+            elif at_limit:
+                # Look ahead not possible; just cut here
+                flush()
+
+        flush()
+        return segments
+
+    @staticmethod
+    def apply_corrections(segments: List['Segment'],
+                          corrections: List[Dict[str, str]]) -> List['Segment']:
+        """Apply text corrections (case-insensitive) to all segments."""
+        if not corrections:
+            return segments
+        patterns = [
+            (re.compile(re.escape(c['from']), re.IGNORECASE), c['to'])
+            for c in corrections
+        ]
+        for seg in segments:
+            for pattern, replacement in patterns:
+                seg.text = pattern.sub(replacement, seg.text)
+        return segments
 
     def get_transcript_text(self, segments: List[Segment],
                            max_duration: Optional[float] = None) -> str:
