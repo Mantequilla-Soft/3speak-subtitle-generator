@@ -30,3 +30,18 @@ services:
     restart: unless-stopped
     mem_limit: 16g
     cpus: 16
+
+  dashboard:
+    build: ./dashboard
+    container_name: 3speak-subtitle-dashboard
+    network_mode: host
+    volumes:
+      - ./config.yaml:/app/config.yaml
+      - /:/hostfs:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DASHBOARD_PORT=8090
+      - START_DATE=2026-02-18
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: 1

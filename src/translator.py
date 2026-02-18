@@ -1,12 +1,13 @@
 """
-NLLB Translator
-Handles translation using Facebook's NLLB-200 model
+NLLB Translator (CTranslate2)
+Fast CPU translation using Facebook's NLLB-200 model via CTranslate2 int8 inference
 """
 
+import os
 import logging
 from typing import List, Dict, Any
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, pipeline
-import torch
+import ctranslate2
+from transformers import AutoTokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -38,48 +39,50 @@ LANGUAGE_MAP = {
 
 
 class Translator:
-    """Handles text translation using NLLB"""
+    """Handles text translation using NLLB via CTranslate2"""
 
     def __init__(self, config: dict):
-        """Initialize NLLB translation model"""
         self.config = config['models']['translation']
-        self.model = None
+        self.translator = None
         self.tokenizer = None
         self._load_model()
 
     def _load_model(self):
-        """Load NLLB model and tokenizer"""
-        try:
-            logger.info(f"Loading translation model: {self.config['model']}")
+        model_name = self.config['model']
+        ct2_model = self.config.get('ct2_model', 'entai2965/nllb-200-distilled-600M-ctranslate2')
+        compute_type = self.config.get('compute_type', 'int8')
+        cache_dir = "/app/models"
+        ct2_dir = os.path.join(cache_dir, "nllb-ct2")
 
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                self.config['model'],
-                cache_dir="/app/models"
-            )
+        # Load tokenizer from original HuggingFace model
+        logger.info(f"Loading tokenizer for {model_name}")
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_name, cache_dir=cache_dir
+        )
 
-            self.model = AutoModelForSeq2SeqLM.from_pretrained(
-                self.config['model'],
-                cache_dir="/app/models",
-                torch_dtype=torch.float32
-            )
+        # Download pre-converted CTranslate2 model on first run
+        if not os.path.exists(os.path.join(ct2_dir, "model.bin")):
+            from huggingface_hub import snapshot_download
+            logger.info(f"Downloading CTranslate2 model: {ct2_model}")
+            snapshot_download(ct2_model, local_dir=ct2_dir)
+            logger.info("Download complete")
 
-            # Move to device
-            if self.config['device'] == 'cpu':
-                self.model = self.model.to('cpu')
-
-            logger.info("Translation model loaded successfully")
-
-        except Exception as e:
-            logger.error(f"Failed to load translation model: {e}")
-            raise
+        # Load CTranslate2 translator (quantizes on-the-fly if model was saved as float16)
+        logger.info(f"Loading CTranslate2 model ({compute_type})")
+        self.translator = ctranslate2.Translator(
+            ct2_dir,
+            device=self.config.get('device', 'cpu'),
+            compute_type=compute_type,
+        )
+        logger.info("CTranslate2 translation model loaded successfully")
 
     def translate_segments(self, segments: List[Dict[str, Any]],
                           source_lang: str, target_lang: str) -> List[Dict[str, Any]]:
         """
-        Translate segments to target language while preserving timestamps
+        Translate segments to target language while preserving timestamps.
 
         Args:
-            segments: List of segment dictionaries with 'start', 'end', 'text'
+            segments: List of segment dicts with 'start', 'end', 'text'
             source_lang: Source language code (ISO 639-1)
             target_lang: Target language code (ISO 639-1)
 
@@ -87,30 +90,44 @@ class Translator:
             List of translated segments with preserved timestamps
         """
         try:
-            # Map language codes
             src_code = LANGUAGE_MAP.get(source_lang, 'eng_Latn')
             tgt_code = LANGUAGE_MAP.get(target_lang, 'eng_Latn')
 
-            logger.info(f"Translating {len(segments)} segments from {source_lang} to {target_lang}")
+            logger.info(f"Translating {len(segments)} segments: {source_lang} → {target_lang}")
 
+            # Tokenize all segments
+            self.tokenizer.src_lang = src_code
+            all_tokens = []
+            for seg in segments:
+                ids = self.tokenizer.encode(seg['text'])
+                tokens = self.tokenizer.convert_ids_to_tokens(ids)
+                all_tokens.append(tokens)
+
+            target_prefix = [[tgt_code]] * len(segments)
+
+            # Translate (CT2 handles internal batching via max_batch_size)
+            beam_size = self.config.get('beam_size', 1)
+            results = self.translator.translate_batch(
+                all_tokens,
+                target_prefix=target_prefix,
+                beam_size=beam_size,
+                no_repeat_ngram_size=3,
+                repetition_penalty=1.3,
+                max_decoding_length=256,
+                max_batch_size=32,
+            )
+
+            # Decode and build output
             translated_segments = []
-
-            # Translate in batches for efficiency
-            batch_size = 8
-            for i in range(0, len(segments), batch_size):
-                batch = segments[i:i + batch_size]
-                texts = [seg['text'] for seg in batch]
-
-                # Translate batch
-                translated_texts = self._translate_batch(texts, src_code, tgt_code)
-
-                # Create translated segments with original timestamps
-                for seg, translated_text in zip(batch, translated_texts):
-                    translated_segments.append({
-                        'start': seg['start'],
-                        'end': seg['end'],
-                        'text': translated_text
-                    })
+            for seg, result in zip(segments, results):
+                output_tokens = result.hypotheses[0]
+                output_ids = self.tokenizer.convert_tokens_to_ids(output_tokens)
+                translation = self.tokenizer.decode(output_ids, skip_special_tokens=True)
+                translated_segments.append({
+                    'start': seg['start'],
+                    'end': seg['end'],
+                    'text': translation,
+                })
 
             logger.info(f"Translation complete: {target_lang}")
             return translated_segments
@@ -118,74 +135,3 @@ class Translator:
         except Exception as e:
             logger.error(f"Translation failed for {target_lang}: {e}")
             raise
-
-    def _translate_batch(self, texts: List[str], src_code: str, tgt_code: str) -> List[str]:
-        """
-        Translate a batch of texts
-
-        Args:
-            texts: List of text strings
-            src_code: NLLB source language code
-            tgt_code: NLLB target language code
-
-        Returns:
-            List of translated strings
-        """
-        try:
-            # Set source language
-            self.tokenizer.src_lang = src_code
-
-            # Tokenize
-            inputs = self.tokenizer(
-                texts,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=512
-            ).to(self.model.device)
-
-            # Get target language token
-            forced_bos_token_id = self.tokenizer.lang_code_to_id[tgt_code]
-
-            # Estimate a sane output cap: 3× input tokens, min 32, max 128
-            input_len = inputs['input_ids'].shape[1]
-            max_new_tokens = max(32, min(128, input_len * 3))
-
-            # Generate translations (greedy — num_beams=1 is ~5× faster on CPU
-            # with negligible quality loss for subtitle-length sentences)
-            with torch.no_grad():
-                generated_tokens = self.model.generate(
-                    **inputs,
-                    forced_bos_token_id=forced_bos_token_id,
-                    max_new_tokens=max_new_tokens,
-                    num_beams=5,
-                    no_repeat_ngram_size=3,      # prevent any 3-gram from repeating
-                    repetition_penalty=1.3,       # penalize repeated tokens
-                )
-
-            # Decode
-            translations = self.tokenizer.batch_decode(
-                generated_tokens,
-                skip_special_tokens=True
-            )
-
-            return translations
-
-        except Exception as e:
-            logger.error(f"Batch translation failed: {e}")
-            # Return original texts on error
-            return texts
-
-    def detect_language(self, text: str) -> str:
-        """
-        Detect language of text (simplified version)
-
-        Args:
-            text: Input text
-
-        Returns:
-            ISO 639-1 language code
-        """
-        # For now, we rely on Whisper's language detection
-        # Could add langdetect library if needed
-        return 'en'

@@ -87,6 +87,7 @@ class SubtitleService:
         Returns:
             True if successful
         """
+        video_start = time.time()
         try:
             author = video.get('owner', 'unknown')
             permlink = video.get('permlink', 'unknown')
@@ -249,7 +250,11 @@ class SubtitleService:
             if self.config['processing']['cleanup_after_processing']:
                 self.ipfs_fetcher.cleanup_video(video_path)
 
-            logger.info(f"\n✓ Successfully processed {author}/{permlink}\n")
+            # Record total processing time
+            processing_seconds = round(time.time() - video_start)
+            if self.enable_mongo_write:
+                self.db.save_processing_time(author, permlink, processing_seconds)
+            logger.info(f"\n✓ Successfully processed {author}/{permlink} in {processing_seconds}s\n")
             return True
 
         except Exception as e:
@@ -302,12 +307,32 @@ class SubtitleService:
             failed_count = 0
 
             for i, video in enumerate(videos, 1):
+                # Check for priority videos before each iteration
+                priority = self.db.get_priority_video()
+                while priority:
+                    logger.info(f"\n⚡ Processing PRIORITY video: {priority.get('owner')}/{priority.get('permlink')}")
+                    self.db.set_processing(
+                        priority.get('owner', 'unknown'),
+                        priority.get('permlink', 'unknown'),
+                        is_embed=(priority.get('_video_type') == 'embed'),
+                    )
+                    self.process_video(priority)
+                    self.db.clear_processing()
+                    time.sleep(2)
+                    priority = self.db.get_priority_video()
+
                 logger.info(f"\nProcessing video {i}/{len(videos)}")
 
+                self.db.set_processing(
+                    video.get('owner', 'unknown'),
+                    video.get('permlink', 'unknown'),
+                    is_embed=(video.get('_video_type') == 'embed'),
+                )
                 if self.process_video(video):
                     success_count += 1
                 else:
                     failed_count += 1
+                self.db.clear_processing()
 
                 # Small delay between videos
                 time.sleep(2)

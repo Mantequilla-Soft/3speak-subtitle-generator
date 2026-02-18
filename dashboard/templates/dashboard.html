@@ -1,0 +1,685 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="refresh" content="{{ refresh_interval }}">
+    <title>3Speak Subtitles Dashboard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0f1117;
+            color: #e1e4e8;
+            padding: 24px;
+            line-height: 1.5;
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 24px;
+        }
+        h1 {
+            font-size: 1.6rem;
+            color: #fff;
+        }
+        .subtitle {
+            color: #8b949e;
+            font-size: 0.85rem;
+            margin-top: 4px;
+        }
+        .refresh-timer {
+            position: relative;
+            width: 40px;
+            height: 40px;
+            flex-shrink: 0;
+        }
+        .refresh-timer svg {
+            transform: rotate(-90deg);
+            width: 40px;
+            height: 40px;
+        }
+        .refresh-timer circle {
+            fill: none;
+            stroke-width: 3;
+        }
+        .refresh-timer .track { stroke: #21262d; }
+        .refresh-timer .progress {
+            stroke: #58a6ff;
+            stroke-dasharray: 113;
+            stroke-dashoffset: 0;
+            stroke-linecap: round;
+            animation: countdown {{ refresh_interval }}s linear forwards;
+        }
+        @keyframes countdown {
+            from { stroke-dashoffset: 0; }
+            to { stroke-dashoffset: 113; }
+        }
+        .refresh-timer .seconds {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 0.7rem;
+            font-weight: 700;
+            color: #8b949e;
+        }
+        .cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 12px;
+            margin-bottom: 32px;
+        }
+        .card {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 16px;
+        }
+        .card .value {
+            font-size: 1.8rem;
+            font-weight: 700;
+            color: #58a6ff;
+        }
+        .card .label {
+            font-size: 0.75rem;
+            color: #8b949e;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-top: 4px;
+        }
+        .card .detail {
+            font-size: 0.75rem;
+            color: #6e7681;
+            margin-top: 2px;
+        }
+        .card.pending .value { color: #d29922; }
+        .card.success .value { color: #3fb950; }
+        .card.embed .value { color: #bc8cff; }
+        .card.legacy .value { color: #3fb950; }
+        .section {
+            margin-bottom: 32px;
+        }
+        .section h2 {
+            font-size: 1.1rem;
+            margin-bottom: 12px;
+            color: #c9d1d9;
+            border-bottom: 1px solid #21262d;
+            padding-bottom: 8px;
+        }
+        /* Charts row */
+        .charts-row {
+            display: grid;
+            grid-template-columns: 2fr 1fr 1fr;
+            gap: 16px;
+            margin-bottom: 32px;
+        }
+        @media (max-width: 900px) {
+            .charts-row { grid-template-columns: 1fr; }
+        }
+        .chart-box {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .chart-box h3 {
+            font-size: 0.85rem;
+            color: #8b949e;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 12px;
+        }
+        .chart-canvas-wrap {
+            width: 100%;
+            max-width: 280px;
+            position: relative;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.85rem;
+        }
+        th {
+            text-align: left;
+            padding: 10px 12px;
+            background: #161b22;
+            color: #8b949e;
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 0.75rem;
+            letter-spacing: 0.5px;
+            border-bottom: 1px solid #30363d;
+        }
+        td {
+            padding: 10px 12px;
+            border-bottom: 1px solid #21262d;
+        }
+        tr:hover { background: #161b22; }
+        .lang-bar {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+        .lang-pill {
+            background: #1f6feb22;
+            border: 1px solid #1f6feb44;
+            color: #58a6ff;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: 500;
+        }
+        .badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 0.7rem;
+            font-weight: 600;
+        }
+        .badge-embed {
+            background: #1f6feb22;
+            color: #58a6ff;
+            border: 1px solid #1f6feb44;
+        }
+        .badge-legacy {
+            background: #3fb95022;
+            color: #3fb950;
+            border: 1px solid #3fb95044;
+        }
+        .badge-complete {
+            background: #3fb95022;
+            color: #3fb950;
+            border: 1px solid #3fb95044;
+        }
+        .badge-processing {
+            background: #58a6ff22;
+            color: #58a6ff;
+            border: 1px solid #58a6ff44;
+            animation: pulse 2s infinite;
+        }
+        .badge-pending {
+            background: #d2992222;
+            color: #d29922;
+            border: 1px solid #d2992244;
+        }
+        .badge-prioritized {
+            background: #bc8cff22;
+            color: #bc8cff;
+            border: 1px solid #bc8cff44;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        .timestamp {
+            color: #8b949e;
+            font-size: 0.8rem;
+        }
+        .system-bar {
+            display: flex;
+            gap: 24px;
+            margin-bottom: 32px;
+            flex-wrap: wrap;
+        }
+        .meter {
+            flex: 1;
+            min-width: 200px;
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 16px;
+        }
+        .meter .meter-label {
+            font-size: 0.8rem;
+            color: #8b949e;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 8px;
+            display: flex;
+            justify-content: space-between;
+        }
+        .meter .meter-value {
+            font-size: 1.2rem;
+            font-weight: 700;
+            color: #e1e4e8;
+        }
+        .meter-track {
+            width: 100%;
+            height: 8px;
+            background: #21262d;
+            border-radius: 4px;
+            margin-top: 8px;
+            overflow: hidden;
+        }
+        .meter-fill {
+            height: 100%;
+            border-radius: 4px;
+            transition: width 0.3s;
+        }
+        .meter-fill.green { background: #3fb950; }
+        .meter-fill.yellow { background: #d29922; }
+        .meter-fill.red { background: #f85149; }
+        .priority-section {
+            display: flex;
+            gap: 24px;
+            margin-bottom: 32px;
+            flex-wrap: wrap;
+        }
+        .priority-form-box {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 20px;
+            flex: 1;
+            min-width: 300px;
+        }
+        .priority-form-box h2 {
+            font-size: 1.1rem;
+            margin-bottom: 12px;
+            color: #c9d1d9;
+            border-bottom: 1px solid #21262d;
+            padding-bottom: 8px;
+        }
+        .priority-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; }
+        .priority-form .field { display: flex; flex-direction: column; gap: 4px; }
+        .priority-form .field label { font-size: 0.75rem; color: #8b949e; text-transform: uppercase; }
+        .priority-form input {
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            color: #e1e4e8;
+            padding: 8px 12px;
+            font-size: 0.85rem;
+            outline: none;
+        }
+        .priority-form input:focus { border-color: #58a6ff; }
+        .priority-form input.video-input { width: 240px; }
+        .priority-form input.pw-input { width: 140px; }
+        .btn {
+            background: #238636;
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            padding: 8px 16px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        .btn:hover { background: #2ea043; }
+        .btn-danger { background: #da3633; }
+        .btn-danger:hover { background: #f85149; }
+        .btn-sm { padding: 4px 10px; font-size: 0.75rem; }
+        .priority-msg {
+            margin-top: 8px;
+            font-size: 0.8rem;
+            min-height: 1.2em;
+        }
+        .priority-msg.ok { color: #3fb950; }
+        .priority-msg.err { color: #f85149; }
+        .priority-queue-box {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 20px;
+            flex: 1;
+            min-width: 260px;
+        }
+        .priority-queue-box h2 {
+            font-size: 1.1rem;
+            margin-bottom: 12px;
+            color: #c9d1d9;
+            border-bottom: 1px solid #21262d;
+            padding-bottom: 8px;
+        }
+        .queue-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 6px 0;
+            border-bottom: 1px solid #21262d;
+            font-size: 0.85rem;
+        }
+        .queue-empty { color: #6e7681; font-size: 0.85rem; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div>
+            <h1>3Speak Subtitles Dashboard</h1>
+            <p class="subtitle">Videos since {{ start_date }} &middot; Last updated: {{ generated_at }}</p>
+        </div>
+        <div class="refresh-timer">
+            <svg viewBox="0 0 40 40">
+                <circle class="track" cx="20" cy="20" r="18"/>
+                <circle class="progress" cx="20" cy="20" r="18"/>
+            </svg>
+            <span class="seconds" id="countdown">{{ refresh_interval }}</span>
+        </div>
+    </div>
+
+    <div class="system-bar">
+        <div class="meter">
+            <div class="meter-label">
+                <span>CPU</span>
+                <span class="meter-value">{{ cpu_percent }}%</span>
+            </div>
+            <div class="meter-track">
+                <div class="meter-fill {{ 'red' if cpu_percent > 80 else ('yellow' if cpu_percent > 50 else 'green') }}"
+                     style="width: {{ cpu_percent }}%"></div>
+            </div>
+        </div>
+        <div class="meter">
+            <div class="meter-label">
+                <span>RAM ({{ ram_used_gb }} / {{ ram_total_gb }} GB)</span>
+                <span class="meter-value">{{ ram_percent }}%</span>
+            </div>
+            <div class="meter-track">
+                <div class="meter-fill {{ 'red' if ram_percent > 80 else ('yellow' if ram_percent > 60 else 'green') }}"
+                     style="width: {{ ram_percent }}%"></div>
+            </div>
+        </div>
+        <div class="meter">
+            <div class="meter-label">
+                <span>Disk ({{ disk_used_gb }} / {{ disk_total_gb }} GB)</span>
+                <span class="meter-value">{{ disk_percent }}%</span>
+            </div>
+            <div class="meter-track">
+                <div class="meter-fill {{ 'red' if disk_percent > 80 else ('yellow' if disk_percent > 60 else 'green') }}"
+                     style="width: {{ disk_percent }}%"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="cards">
+        <div class="card success">
+            <div class="value">{{ total_processed }}</div>
+            <div class="label">Processed</div>
+        </div>
+        <div class="card">
+            <div class="value">{{ total_subtitles }}</div>
+            <div class="label">Subtitle Files</div>
+        </div>
+        <div class="card pending">
+            <div class="value">{{ pending }}</div>
+            <div class="label">Pending</div>
+        </div>
+        <div class="card embed">
+            <div class="value">{{ total_embed }}</div>
+            <div class="label">Embed Videos</div>
+            <div class="detail">{{ processed_embed }} done / {{ pending_embed }} pending</div>
+        </div>
+        <div class="card legacy">
+            <div class="value">{{ total_legacy }}</div>
+            <div class="label">Legacy Videos</div>
+            <div class="detail">{{ processed_legacy }} done / {{ pending_legacy }} pending</div>
+        </div>
+        <div class="card">
+            <div class="value">{{ lang_counts|length }}</div>
+            <div class="label">Languages</div>
+        </div>
+    </div>
+
+    <div class="charts-row">
+        <div class="chart-box">
+            <h3>Languages</h3>
+            <div class="chart-canvas-wrap">
+                <canvas id="langChart"></canvas>
+            </div>
+        </div>
+        <div class="chart-box">
+            <h3>Video Types</h3>
+            <div class="chart-canvas-wrap">
+                <canvas id="typeChart"></canvas>
+            </div>
+        </div>
+        <div class="chart-box">
+            <h3>Progress</h3>
+            <div class="chart-canvas-wrap">
+                <canvas id="progressChart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Video Activity</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Status</th>
+                    <th>Video</th>
+                    <th>Type</th>
+                    <th>Languages</th>
+                    <th>Time</th>
+                    <th>Date</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for doc in recent %}
+                <tr>
+                    <td>
+                        <span class="badge badge-{{ doc.state }}">{{ doc.state }}</span>
+                    </td>
+                    <td>
+                        {% if doc.get('isEmbed') %}
+                        <a href="https://preview.3speak.tv/shorts?v={{ doc.author }}/{{ doc.permlink }}" target="_blank" style="color: #e1e4e8; text-decoration: none;">
+                        {% else %}
+                        <a href="https://preview.3speak.tv/@{{ doc.author }}/{{ doc.permlink }}" target="_blank" style="color: #e1e4e8; text-decoration: none;">
+                        {% endif %}
+                            <strong>{{ doc.author }}</strong>/{{ doc.permlink }}
+                        </a>
+                    </td>
+                    <td>
+                        {% if doc.get('isEmbed') %}
+                        <span class="badge badge-embed">embed</span>
+                        {% else %}
+                        <span class="badge badge-legacy">legacy</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        <div class="lang-bar">
+                            {% for lang in doc.languages %}
+                            <span class="lang-pill">{{ lang }}</span>
+                            {% endfor %}
+                        </div>
+                    </td>
+                    <td class="timestamp">
+                        {% if doc.processing_seconds is defined and doc.processing_seconds is not none %}
+                            {% set secs = doc.processing_seconds %}
+                            {% if secs >= 3600 %}
+                                {{ (secs // 3600) }}h {{ ((secs % 3600) // 60) }}m
+                            {% elif secs >= 60 %}
+                                {{ (secs // 60) }}m {{ (secs % 60) }}s
+                            {% else %}
+                                {{ secs }}s
+                            {% endif %}
+                        {% else %}
+                            -
+                        {% endif %}
+                    </td>
+                    <td class="timestamp">
+                        {% if doc.display_date %}
+                            {{ doc.display_date.strftime('%Y-%m-%d %H:%M') }}
+                        {% else %}
+                            -
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <div class="priority-section">
+        <div class="priority-form-box">
+            <h2>Prioritize Video</h2>
+            <div class="priority-form">
+                <div class="field">
+                    <label>Author / Permlink</label>
+                    <input type="text" id="prioVideo" class="video-input" placeholder="author/permlink">
+                </div>
+                <div class="field">
+                    <label>Password</label>
+                    <input type="password" id="prioPw" class="pw-input" placeholder="password">
+                </div>
+                <button class="btn" onclick="submitPriority()">Prioritize</button>
+            </div>
+            <div class="priority-msg" id="prioMsg"></div>
+        </div>
+        <div class="priority-queue-box">
+            <h2>Priority Queue</h2>
+            <div id="prioQueue"><span class="queue-empty">Loading...</span></div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+    <script>
+        // Countdown timer
+        let seconds = {{ refresh_interval }};
+        const el = document.getElementById('countdown');
+        setInterval(() => {
+            seconds--;
+            if (seconds >= 0) el.textContent = seconds;
+        }, 1000);
+
+        // Chart.js global defaults for dark theme
+        Chart.defaults.color = '#8b949e';
+        Chart.defaults.plugins.tooltip.backgroundColor = '#1c2128';
+        Chart.defaults.plugins.tooltip.titleColor = '#e1e4e8';
+        Chart.defaults.plugins.tooltip.bodyColor = '#e1e4e8';
+        Chart.defaults.plugins.tooltip.borderColor = '#30363d';
+        Chart.defaults.plugins.tooltip.borderWidth = 1;
+        Chart.defaults.plugins.tooltip.padding = 10;
+        Chart.defaults.plugins.tooltip.cornerRadius = 6;
+        Chart.defaults.plugins.tooltip.displayColors = true;
+        Chart.defaults.plugins.tooltip.boxPadding = 4;
+
+        // Shared donut config
+        function makeDonut(canvasId, labels, data, colors) {
+            const total = data.reduce((s, v) => s + v, 0);
+            return new Chart(document.getElementById(canvasId), {
+                type: 'doughnut',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        data: data,
+                        backgroundColor: colors,
+                        borderColor: '#161b22',
+                        borderWidth: 2,
+                        hoverBorderColor: '#e1e4e8',
+                        hoverBorderWidth: 2,
+                        hoverOffset: 6
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: true,
+                    cutout: '55%',
+                    plugins: {
+                        legend: {
+                            position: 'bottom',
+                            labels: {
+                                padding: 12,
+                                usePointStyle: true,
+                                pointStyleWidth: 10,
+                                font: { size: 12 }
+                            }
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: function(ctx) {
+                                    const value = ctx.parsed;
+                                    const pct = total > 0 ? ((value / total) * 100).toFixed(1) : 0;
+                                    return ` ${ctx.label}: ${value.toLocaleString()} (${pct}%)`;
+                                }
+                            }
+                        }
+                    },
+                    animation: { animateRotate: true, duration: 600 }
+                }
+            });
+        }
+
+        // Color palette
+        const palette = [
+            '#58a6ff', '#3fb950', '#bc8cff', '#d29922', '#f85149',
+            '#79c0ff', '#56d364', '#d2a8ff', '#e3b341', '#ff7b72',
+            '#a5d6ff', '#7ee787', '#e8d4ff', '#f0c846', '#ffa198'
+        ];
+
+        // Language donut
+        const langLabels = [{% for lang in lang_counts %}'{{ lang }}',{% endfor %}];
+        const langValues = [{% for count in lang_counts.values() %}{{ count }},{% endfor %}];
+        const langColors = langLabels.map((_, i) => palette[i % palette.length]);
+        makeDonut('langChart', langLabels, langValues, langColors);
+
+        // Video Types donut
+        makeDonut('typeChart',
+            ['Embed', 'Legacy'],
+            [{{ total_embed }}, {{ total_legacy }}],
+            ['#bc8cff', '#3fb950']
+        );
+
+        // Progress donut
+        makeDonut('progressChart',
+            ['Processed', 'Pending'],
+            [{{ total_processed }}, {{ pending }}],
+            ['#3fb950', '#d29922']
+        );
+
+        // Priority queue
+        function loadQueue() {
+            fetch('/api/priority').then(r => r.json()).then(items => {
+                const el = document.getElementById('prioQueue');
+                if (!items.length) {
+                    el.innerHTML = '<span class="queue-empty">Queue is empty</span>';
+                    return;
+                }
+                el.innerHTML = items.map(item =>
+                    `<div class="queue-item">
+                        <span>${item.author}/${item.permlink}</span>
+                        <button class="btn btn-danger btn-sm" onclick="removePriority('${item._id}')">Cancel</button>
+                    </div>`
+                ).join('');
+            });
+        }
+        loadQueue();
+
+        function submitPriority() {
+            const video = document.getElementById('prioVideo').value.trim();
+            const pw = document.getElementById('prioPw').value;
+            const msg = document.getElementById('prioMsg');
+            msg.textContent = '';
+            msg.className = 'priority-msg';
+
+            fetch('/api/prioritize', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({video: video, password: pw})
+            }).then(r => r.json().then(d => ({status: r.status, data: d})))
+            .then(({status, data}) => {
+                if (status === 200) {
+                    msg.textContent = `Added ${data.author}/${data.permlink} to priority queue`;
+                    msg.className = 'priority-msg ok';
+                    document.getElementById('prioVideo').value = '';
+                    loadQueue();
+                } else {
+                    msg.textContent = data.error || 'Error';
+                    msg.className = 'priority-msg err';
+                }
+            });
+        }
+
+        function removePriority(id) {
+            const pw = document.getElementById('prioPw').value;
+            fetch(`/api/priority/${id}?password=${encodeURIComponent(pw)}`, {method: 'DELETE'})
+                .then(r => r.json())
+                .then(() => loadQueue());
+        }
+    </script>
+</body>
+</html>

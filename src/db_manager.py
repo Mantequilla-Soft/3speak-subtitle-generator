@@ -42,6 +42,8 @@ class DatabaseManager:
             self.embed_collection = self.db[self.config['collection_embed']]
             self.subtitles_collection = self.db[self.config['collection_subtitles']]
             self.tags_collection = self.db[self.config['collection_tags']]
+            self.priority_collection = self.db[self.config.get('collection_priority', 'subtitles-priority')]
+            self.status_collection = self.db[self.config.get('collection_status', 'subtitles-status')]
 
             logger.info(f"Connected to MongoDB: {self.config['database']}")
         except errors.ServerSelectionTimeoutError as e:
@@ -140,6 +142,48 @@ class DatabaseManager:
             logger.error(f"Error fetching video {owner}/{permlink}: {e}")
             return None
 
+    def get_priority_video(self) -> Optional[Dict[str, Any]]:
+        """Pop the oldest priority request and return the full video document."""
+        try:
+            entry = self.priority_collection.find_one_and_delete(
+                {}, sort=[('requested_at', 1)]
+            )
+            if not entry:
+                return None
+            author = entry['author']
+            permlink = entry['permlink']
+            logger.info(f"Priority video requested: {author}/{permlink}")
+            video = self.get_video_by_owner_permlink(author, permlink)
+            if not video:
+                logger.warning(f"Priority video {author}/{permlink} not found in DB")
+            return video
+        except Exception as e:
+            logger.error(f"Error checking priority queue: {e}")
+            return None
+
+    def set_processing(self, author: str, permlink: str, is_embed: bool = False):
+        """Mark a video as currently being processed (single-document collection)."""
+        try:
+            self.status_collection.replace_one(
+                {},
+                {
+                    'author': author,
+                    'permlink': permlink,
+                    'isEmbed': is_embed,
+                    'started_at': datetime.now(),
+                },
+                upsert=True,
+            )
+        except Exception as e:
+            logger.error(f"Error setting processing status: {e}")
+
+    def clear_processing(self):
+        """Clear the currently-processing status."""
+        try:
+            self.status_collection.delete_many({})
+        except Exception as e:
+            logger.error(f"Error clearing processing status: {e}")
+
     def get_last_processed_video_date(self) -> Optional[datetime]:
         """
         Get the video creation date of the most recently processed video.
@@ -226,6 +270,18 @@ class DatabaseManager:
 
         except Exception as e:
             logger.error(f"Error saving subtitle: {e}")
+            return False
+
+    def save_processing_time(self, author: str, permlink: str, seconds: int) -> bool:
+        """Save total processing time (in seconds) on the subtitle document."""
+        try:
+            self.subtitles_collection.update_one(
+                {'author': author, 'permlink': permlink},
+                {'$set': {'processing_seconds': seconds}},
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Error saving processing time: {e}")
             return False
 
     def save_tags(self, author: str, permlink: str, tags: List[str]) -> bool:
