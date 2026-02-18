@@ -94,3 +94,9 @@ tagging:
   min_confidence: 0.3  # Minimum confidence score for tag assignment
   use_transcript_sample: true  # Use first 5 minutes of transcript for efficiency
   sample_duration: 300  # seconds
+
+# Dashboard Configuration
+dashboard:
+  port: 8090
+  refresh_interval: 15  # seconds
+  password: "changeme"  # Password for priority queue
