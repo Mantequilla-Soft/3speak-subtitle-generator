@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+
+# Models and Cache
+models/
+.transformers_cache/
+
+# Temporary files
+temp/
+
+# Video files
+*.mp4
+*.avi
+*.mkv
+*.webm
+*.ts
+*.m3u8
+
+# Subtitle output
+subtitles/
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+.dockerignore
+
+# Sensitive
+.env
+config.local.yaml
+config.yaml
+
+# Debug scripts
+debug_*.py

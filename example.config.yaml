@@ -1,0 +1,96 @@
+# 3Speak Subtitle Generator Configuration
+
+# MongoDB Configuration
+mongodb:
+  uri: ""
+  database: ""
+  collection_videos: ""
+  collection_embed: ""
+  collection_subtitles: ""
+  collection_tags: ""
+
+# IPFS Configuration
+ipfs:
+  gateways:
+    # - "https://hotipfs-3speak-1.b-cdn.net/ipfs/"
+    # - "https://ipfs-3speak.b-cdn.net/ipfs/"
+    - "https://ipfs.3speak.tv/ipfs/"
+    - "https://ipfs-audio.3speak.tv/ipfs/"
+  timeout: 300        # seconds between chunks for direct downloads (requests read timeout)
+  ffmpeg_timeout: 3600  # seconds total for HLS downloads via ffmpeg (1 hour)
+  api_url: "http://host.docker.internal:5001"  # host IPFS daemon API
+
+# Model Configuration
+models:
+  whisper:
+    model_size: "medium"  # tiny, base, small, medium, large-v3
+    device: "cpu"
+    compute_type: "int8"  # int8 for CPU efficiency
+
+  translation:
+    model: "facebook/nllb-200-distilled-600M"
+    device: "cpu"
+
+  tagging:
+    model: "facebook/bart-large-mnli"  # Zero-shot classification
+    device: "cpu"
+
+# Target Languages (ISO 639-1 codes)
+# Edit this list to add/remove languages
+languages:
+  - code: "en"
+    name: "English"
+  - code: "es"
+    name: "Spanish"
+  - code: "fr"
+    name: "French"
+  - code: "de"
+    name: "German"
+  - code: "pt"
+    name: "Portuguese"
+  - code: "ru"
+    name: "Russian"
+  - code: "ja"
+    name: "Japanese"
+  - code: "zh"
+    name: "Chinese"
+  - code: "ar"
+    name: "Arabic"
+  - code: "hi"
+    name: "Hindi"
+  - code: "ko"
+    name: "Korean"
+
+# Video Content Tags
+# These tags will be used for zero-shot classification
+tags:
+  - "food"
+  - "travel"
+  - "vlog"
+  - "tutorial"
+  - "education"
+  - "technology"
+  - "gaming"
+  - "music"
+  - "art"
+  - "health"
+  - "news"
+  - "sports"
+  - "nature"
+  - "science"
+  - "cryptocurrency"
+  - "finance"
+
+# Processing Configuration
+processing:
+  batch_size: 1  # Process videos one at a time
+  cleanup_after_processing: true
+  max_retries: 3
+  subtitle_format: "srt"  # srt or vtt
+
+# Tagging Configuration
+tagging:
+  max_tags: 5  # Maximum number of tags per video
+  min_confidence: 0.3  # Minimum confidence score for tag assignment
+  use_transcript_sample: true  # Use first 5 minutes of transcript for efficiency
+  sample_duration: 300  # seconds

@@ -1,0 +1,32 @@
+services:
+  subtitle-generator:
+    build: .
+    container_name: 3speak-subtitle-generator
+    network_mode: host
+    volumes:
+      - ./models:/app/models
+      - ./temp:/app/temp
+      - ./subtitles:/app/subtitles
+      - ./config.yaml:/app/config.yaml
+      - ./src:/app/src
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TRANSFORMERS_CACHE=/app/models
+      - HF_HOME=/app/models
+      # Set to "false" to skip writing subtitle files to the local /subtitles volume
+      - ENABLE_LOCAL_SAVE=true
+      # Set to "true" to upload generated subtitles to the local IPFS node
+      - ENABLE_IPFS_PIN=true
+      # Set to "true" to also pin each subtitle CID on the remote node (requires ENABLE_IPFS_PIN=true)
+      - ENABLE_REMOTE_PIN=true
+      # Remote IPFS pin endpoint called when ENABLE_REMOTE_PIN=true
+      - REMOTE_PIN_URL=https://ipfs.3speak.tv/api/v0/pin/add
+      # Set to "true" to write subtitles and tags to MongoDB
+      - ENABLE_MONGO_WRITE=true
+      # Only process videos created on or after this date (YYYY-MM-DD). Leave empty to process all.
+      - START_DATE=2026-02-18
+      # When set to "owner/permlink", process only that one video (overrides start date)
+      - PROCESS_ONLY=
+    restart: unless-stopped
+    mem_limit: 16g
+    cpus: 16
