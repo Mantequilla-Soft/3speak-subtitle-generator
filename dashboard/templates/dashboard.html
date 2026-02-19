@@ -636,94 +636,176 @@
 
     <div class="section">
         <h2>Video Activity</h2>
-        <table>
-            <thead>
-                <tr>
-                    <th>Status</th>
-                    <th>Video</th>
-                    <th>Type</th>
-                    <th>Duration</th>
-                    <th>Languages</th>
-                    <th>Time</th>
-                    <th>Date</th>
-                    <th></th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for doc in recent %}
-                <tr>
-                    <td>
-                        <span class="badge badge-{{ doc.state }}">{{ doc.state }}</span>
-                    </td>
-                    <td>
-                        {% if doc.get('isEmbed') %}
-                        <a href="https://preview.3speak.tv/shorts?v={{ doc.author }}/{{ doc.permlink }}" target="_blank" style="color: #e1e4e8; text-decoration: none;">
-                        {% else %}
-                        <a href="https://preview.3speak.tv/@{{ doc.author }}/{{ doc.permlink }}" target="_blank" style="color: #e1e4e8; text-decoration: none;">
-                        {% endif %}
-                            <strong>{{ doc.author }}</strong>/{{ doc.permlink }}
-                        </a>
-                    </td>
-                    <td>
-                        {% if doc.get('isAudio') %}
-                        <span class="badge badge-audio">audio</span>
-                        {% elif doc.get('isEmbed') %}
-                        <span class="badge badge-embed">embed</span>
-                        {% else %}
-                        <span class="badge badge-legacy">legacy</span>
-                        {% endif %}
-                    </td>
-                    <td class="timestamp">
-                        {% if doc.video_duration_seconds is defined and doc.video_duration_seconds %}
-                            {% set dur = doc.video_duration_seconds %}
-                            {% if dur >= 3600 %}
-                                {{ (dur // 3600) }}h {{ ((dur % 3600) // 60) }}m
-                            {% elif dur >= 60 %}
-                                {{ (dur // 60) }}m {{ (dur % 60) }}s
+        <div style="display:flex; border-bottom:1px solid #30363d;">
+            <button class="mgmt-tab active" id="tabPending" onclick="switchActivityTab('pending')">
+                Pending ({{ pending_items|length }})
+            </button>
+            <button class="mgmt-tab" id="tabProcessed" onclick="switchActivityTab('processed')">
+                Processed ({{ total_processed }})
+            </button>
+        </div>
+
+        <div id="activityPending">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Status</th>
+                        <th>Video</th>
+                        <th>Type</th>
+                        <th>Date</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for doc in pending_items %}
+                    <tr>
+                        <td>
+                            <span class="badge badge-{{ doc.state }}">{{ doc.state }}</span>
+                        </td>
+                        <td>
+                            {% if doc.get('isEmbed') %}
+                            <a href="https://preview.3speak.tv/shorts?v={{ doc.author }}/{{ doc.permlink }}" target="_blank" style="color: #e1e4e8; text-decoration: none;">
                             {% else %}
-                                {{ dur }}s
+                            <a href="https://preview.3speak.tv/@{{ doc.author }}/{{ doc.permlink }}" target="_blank" style="color: #e1e4e8; text-decoration: none;">
                             {% endif %}
-                        {% else %}
-                            -
-                        {% endif %}
-                    </td>
-                    <td>
-                        <div class="lang-bar">
-                            {% for lang in doc.languages %}
-                            <span class="lang-pill">{{ lang }}</span>
-                            {% endfor %}
-                        </div>
-                    </td>
-                    <td class="timestamp">
-                        {% if doc.processing_seconds is defined and doc.processing_seconds is not none %}
-                            {% set secs = doc.processing_seconds %}
-                            {% if secs >= 3600 %}
-                                {{ (secs // 3600) }}h {{ ((secs % 3600) // 60) }}m
-                            {% elif secs >= 60 %}
-                                {{ (secs // 60) }}m {{ (secs % 60) }}s
+                                <strong>{{ doc.author }}</strong>/{{ doc.permlink }}
+                            </a>
+                        </td>
+                        <td>
+                            {% if doc.get('isAudio') %}
+                            <span class="badge badge-audio">audio</span>
+                            {% elif doc.get('isEmbed') %}
+                            <span class="badge badge-embed">embed</span>
                             {% else %}
-                                {{ secs }}s
+                            <span class="badge badge-legacy">legacy</span>
                             {% endif %}
-                        {% else %}
-                            -
-                        {% endif %}
-                    </td>
-                    <td class="timestamp">
-                        {% if doc.display_date %}
-                            {{ doc.display_date.strftime('%Y-%m-%d %H:%M') }}
-                        {% else %}
-                            -
-                        {% endif %}
-                    </td>
-                    <td>
-                        {% if doc.state == 'complete' %}
-                        <button class="btn btn-sm" style="background:#d29922;white-space:nowrap;" onclick="reprocessVideo('{{ doc.author }}/{{ doc.permlink }}', this)">Reprocess</button>
-                        {% endif %}
-                    </td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
+                        </td>
+                        <td class="timestamp">
+                            {% if doc.display_date %}
+                                {{ doc.display_date.strftime('%Y-%m-%d %H:%M') }}
+                            {% else %}
+                                -
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% if not pending_items %}
+            <p style="text-align:center; color:#6e7681; padding:24px 0;">No pending videos</p>
+            {% endif %}
+        </div>
+
+        <div id="activityProcessed" style="display:none;">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Video</th>
+                        <th>Type</th>
+                        <th>Duration</th>
+                        <th>Languages</th>
+                        <th>Time</th>
+                        <th>Date</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody id="processedTbody">
+                    {% for doc in processed_items %}
+                    <tr>
+                        <td>
+                            {% if doc.get('isEmbed') %}
+                            <a href="https://preview.3speak.tv/shorts?v={{ doc.author }}/{{ doc.permlink }}" target="_blank" style="color: #e1e4e8; text-decoration: none;">
+                            {% else %}
+                            <a href="https://preview.3speak.tv/@{{ doc.author }}/{{ doc.permlink }}" target="_blank" style="color: #e1e4e8; text-decoration: none;">
+                            {% endif %}
+                                <strong>{{ doc.author }}</strong>/{{ doc.permlink }}
+                            </a>
+                        </td>
+                        <td>
+                            {% if doc.get('isAudio') %}
+                            <span class="badge badge-audio">audio</span>
+                            {% elif doc.get('isEmbed') %}
+                            <span class="badge badge-embed">embed</span>
+                            {% else %}
+                            <span class="badge badge-legacy">legacy</span>
+                            {% endif %}
+                        </td>
+                        <td class="timestamp">
+                            {% if doc.video_duration_seconds is defined and doc.video_duration_seconds %}
+                                {% set dur = doc.video_duration_seconds %}
+                                {% if dur >= 3600 %}
+                                    {{ (dur // 3600) }}h {{ ((dur % 3600) // 60) }}m
+                                {% elif dur >= 60 %}
+                                    {{ (dur // 60) }}m {{ (dur % 60) }}s
+                                {% else %}
+                                    {{ dur }}s
+                                {% endif %}
+                            {% else %}
+                                -
+                            {% endif %}
+                        </td>
+                        <td>
+                            <div class="lang-bar">
+                                {% for lang in doc.languages %}
+                                <span class="lang-pill">{{ lang }}</span>
+                                {% endfor %}
+                            </div>
+                        </td>
+                        <td class="timestamp">
+                            {% if doc.processing_seconds is defined and doc.processing_seconds is not none %}
+                                {% set secs = doc.processing_seconds %}
+                                {% if secs >= 3600 %}
+                                    {{ (secs // 3600) }}h {{ ((secs % 3600) // 60) }}m
+                                {% elif secs >= 60 %}
+                                    {{ (secs // 60) }}m {{ (secs % 60) }}s
+                                {% else %}
+                                    {{ secs }}s
+                                {% endif %}
+                            {% else %}
+                                -
+                            {% endif %}
+                        </td>
+                        <td class="timestamp">
+                            {% if doc.display_date %}
+                                {{ doc.display_date.strftime('%Y-%m-%d %H:%M') }}
+                            {% else %}
+                                -
+                            {% endif %}
+                        </td>
+                        <td>
+                            <button class="btn btn-sm" style="background:#d29922;white-space:nowrap;" onclick="reprocessVideo('{{ doc.author }}/{{ doc.permlink }}', this)">Reprocess</button>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            <div style="text-align:center; padding:16px;">
+                <button class="btn btn-sm" id="loadMoreBtn" style="background:#21262d; border:1px solid #30363d; color:#8b949e;" onclick="loadMoreProcessed()">Load more</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Backend Logs</h2>
+        <div id="logViewer" style="
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 12px 16px;
+            font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', Consolas, monospace;
+            font-size: 0.78rem;
+            line-height: 1.6;
+            max-height: 500px;
+            overflow-y: auto;
+            color: #8b949e;
+            white-space: pre-wrap;
+            word-break: break-all;
+        ">Connecting...</div>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-top:8px;">
+            <span id="logStatus" style="font-size:0.75rem; color:#d29922;">Connecting...</span>
+            <button class="btn btn-sm" style="background:#21262d; border:1px solid #30363d; color:#8b949e;" onclick="toggleAutoScroll()">
+                Auto-scroll: <span id="autoScrollLabel">ON</span>
+            </button>
+        </div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
@@ -783,6 +865,85 @@
             const btn = document.getElementById('refreshBtn');
             btn.classList.add('spinning');
             setTimeout(() => location.reload(), 100);
+        }
+
+        // Activity tabs
+        function switchActivityTab(tab) {
+            document.getElementById('activityPending').style.display = tab === 'pending' ? '' : 'none';
+            document.getElementById('activityProcessed').style.display = tab === 'processed' ? '' : 'none';
+            document.getElementById('tabPending').classList.toggle('active', tab === 'pending');
+            document.getElementById('tabProcessed').classList.toggle('active', tab === 'processed');
+        }
+
+        // Load more processed videos
+        var processedPage = 1;
+        function loadMoreProcessed() {
+            processedPage++;
+            var btn = document.getElementById('loadMoreBtn');
+            btn.textContent = 'Loading...';
+            btn.disabled = true;
+
+            fetch('/api/processed?page=' + processedPage)
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    var tbody = document.getElementById('processedTbody');
+                    data.items.forEach(function(doc) {
+                        var tr = document.createElement('tr');
+                        tr.innerHTML = renderProcessedRow(doc);
+                        tbody.appendChild(tr);
+                    });
+                    if (!data.has_more) {
+                        btn.style.display = 'none';
+                    } else {
+                        btn.textContent = 'Load more';
+                        btn.disabled = false;
+                    }
+                });
+        }
+
+        function renderProcessedRow(doc) {
+            var link = doc.isEmbed
+                ? 'https://preview.3speak.tv/shorts?v=' + doc.author + '/' + doc.permlink
+                : 'https://preview.3speak.tv/@' + doc.author + '/' + doc.permlink;
+
+            var typeBadge = doc.isAudio ? '<span class="badge badge-audio">audio</span>' :
+                            doc.isEmbed ? '<span class="badge badge-embed">embed</span>' :
+                            '<span class="badge badge-legacy">legacy</span>';
+
+            var duration = '-';
+            if (doc.video_duration_seconds) {
+                var d = doc.video_duration_seconds;
+                if (d >= 3600) duration = Math.floor(d/3600) + 'h ' + Math.floor((d%3600)/60) + 'm';
+                else if (d >= 60) duration = Math.floor(d/60) + 'm ' + (d%60) + 's';
+                else duration = d + 's';
+            }
+
+            var langs = (doc.languages || []).map(function(l) {
+                return '<span class="lang-pill">' + l + '</span>';
+            }).join('');
+
+            var procTime = '-';
+            if (doc.processing_seconds != null) {
+                var s = doc.processing_seconds;
+                if (s >= 3600) procTime = Math.floor(s/3600) + 'h ' + Math.floor((s%3600)/60) + 'm';
+                else if (s >= 60) procTime = Math.floor(s/60) + 'm ' + (s%60) + 's';
+                else procTime = s + 's';
+            }
+
+            var dateStr = '-';
+            if (doc.display_date) {
+                var dt = new Date(doc.display_date);
+                dateStr = dt.toISOString().slice(0, 16).replace('T', ' ');
+            }
+
+            var ref = doc.author + '/' + doc.permlink;
+            return '<td><a href="' + link + '" target="_blank" style="color:#e1e4e8;text-decoration:none;"><strong>' + doc.author + '</strong>/' + doc.permlink + '</a></td>' +
+                '<td>' + typeBadge + '</td>' +
+                '<td class="timestamp">' + duration + '</td>' +
+                '<td><div class="lang-bar">' + langs + '</div></td>' +
+                '<td class="timestamp">' + procTime + '</td>' +
+                '<td class="timestamp">' + dateStr + '</td>' +
+                '<td><button class="btn btn-sm" style="background:#d29922;white-space:nowrap;" onclick="reprocessVideo(\'' + ref + '\', this)">Reprocess</button></td>';
         }
 
         // Chart.js global defaults for dark theme
@@ -1183,6 +1344,77 @@
                 .then(r => r.json())
                 .then(() => loadCorrections());
         }
+
+        // Backend Logs
+        (function() {
+            const viewer = document.getElementById('logViewer');
+            const statusEl = document.getElementById('logStatus');
+            const autoScrollLabel = document.getElementById('autoScrollLabel');
+            let autoScroll = true;
+            const MAX_LINES = 500;
+            let lineCount = 0;
+
+            window.toggleAutoScroll = function() {
+                autoScroll = !autoScroll;
+                autoScrollLabel.textContent = autoScroll ? 'ON' : 'OFF';
+                if (autoScroll) viewer.scrollTop = viewer.scrollHeight;
+            };
+
+            function connect() {
+                viewer.textContent = '';
+                lineCount = 0;
+                statusEl.textContent = 'Connecting...';
+                statusEl.style.color = '#d29922';
+
+                const es = new EventSource('/api/logs/stream');
+
+                es.onopen = function() {
+                    statusEl.textContent = 'Connected (streaming)';
+                    statusEl.style.color = '#3fb950';
+                };
+
+                es.onmessage = function(e) {
+                    const data = JSON.parse(e.data);
+                    if (typeof data === 'object' && data.error) {
+                        statusEl.textContent = 'Error: ' + data.error;
+                        statusEl.style.color = '#f85149';
+                        es.close();
+                        setTimeout(connect, 5000);
+                        return;
+                    }
+
+                    const div = document.createElement('div');
+                    div.textContent = data;
+
+                    if (data.includes('ERROR') || data.includes('Error')) {
+                        div.style.color = '#f85149';
+                    } else if (data.includes('WARNING') || data.includes('Warning')) {
+                        div.style.color = '#d29922';
+                    }
+
+                    viewer.appendChild(div);
+                    lineCount++;
+
+                    while (lineCount > MAX_LINES) {
+                        viewer.removeChild(viewer.firstChild);
+                        lineCount--;
+                    }
+
+                    if (autoScroll) {
+                        viewer.scrollTop = viewer.scrollHeight;
+                    }
+                };
+
+                es.onerror = function() {
+                    statusEl.textContent = 'Disconnected \u2013 reconnecting...';
+                    statusEl.style.color = '#d29922';
+                    es.close();
+                    setTimeout(connect, 3000);
+                };
+            }
+
+            connect();
+        })();
 
         // Reprocess
         function reprocessVideo(ref, btn) {

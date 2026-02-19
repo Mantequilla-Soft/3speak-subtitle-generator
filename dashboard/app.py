@@ -4,11 +4,14 @@ Lightweight Flask app for monitoring subtitle processing
 """
 
 import os
+import json
+import socket
+import struct
 import shutil
 import yaml
 import logging
 from datetime import datetime
-from flask import Flask, render_template, jsonify, request
+from flask import Flask, render_template, jsonify, request, Response
 from pymongo import MongoClient
 import psutil
 
@@ -192,13 +195,13 @@ def get_stats():
             'display_date': item.get('requested_at'),
         })
 
-    # 3. Completed videos (last 15)
+    # 3. Completed videos (last 50)
     completed_raw = list(subtitles_col.find(
         {},
         {'author': 1, 'permlink': 1, 'subtitles': 1, 'isEmbed': 1,
          'created_at': 1, 'updated_at': 1, 'video_created_at': 1,
          'processing_seconds': 1, 'video_duration_seconds': 1, 'isAudio': 1, '_id': 0}
-    ).sort('updated_at', -1).limit(15))
+    ).sort('updated_at', -1).limit(50))
     for doc in completed_raw:
         doc['state'] = 'complete'
         if 'subtitles' in doc:
@@ -275,9 +278,12 @@ def get_stats():
         sv['lang_count'] = 0
         sv['display_date'] = sv.get('video_created_at')
         pending_entries.append(sv)
-        if len(pending_entries) >= 10:
+        if len(pending_entries) >= 50:
             break
     recent.extend(pending_entries)
+
+    pending_items = [r for r in recent if r['state'] != 'complete']
+    processed_items = [r for r in recent if r['state'] == 'complete']
 
     system = get_system_metrics()
 
@@ -299,6 +305,8 @@ def get_stats():
         'start_date': start_date_str or 'all',
         'lang_counts': lang_counts,
         'recent': recent,
+        'pending_items': pending_items,
+        'processed_items': processed_items,
         'refresh_interval': REFRESH_INTERVAL,
         'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         **system,
@@ -670,6 +678,110 @@ def api_reprocess():
 
     logger.info(f"Reprocess requested: {author}/{permlink} (subtitles deleted: {deleted})")
     return jsonify({'ok': True, 'author': author, 'permlink': permlink, 'deleted': deleted})
+
+
+@app.route('/api/processed')
+def api_processed():
+    page = int(request.args.get('page', 1))
+    per_page = min(int(request.args.get('per_page', 50)), 100)
+    skip = (page - 1) * per_page
+
+    docs = list(subtitles_col.find(
+        {},
+        {'author': 1, 'permlink': 1, 'subtitles': 1, 'isEmbed': 1,
+         'created_at': 1, 'updated_at': 1, 'video_created_at': 1,
+         'processing_seconds': 1, 'video_duration_seconds': 1, 'isAudio': 1, '_id': 0}
+    ).sort('updated_at', -1).skip(skip).limit(per_page))
+
+    items = []
+    for doc in docs:
+        if 'subtitles' in doc:
+            doc['languages'] = list(doc['subtitles'].keys())
+            del doc['subtitles']
+        else:
+            doc['languages'] = []
+        doc['display_date'] = doc.get('updated_at') or doc.get('created_at')
+        for key in ('created_at', 'updated_at', 'video_created_at', 'display_date'):
+            if key in doc and isinstance(doc[key], datetime):
+                doc[key] = doc[key].isoformat()
+        items.append(doc)
+
+    total = subtitles_col.count_documents({})
+    return jsonify({
+        'items': items,
+        'page': page,
+        'has_more': skip + len(items) < total,
+    })
+
+
+DOCKER_SOCK = '/var/run/docker.sock'
+BACKEND_CONTAINER = '3speak-subtitle-generator'
+
+
+@app.route('/api/logs/stream')
+def api_logs_stream():
+    """SSE endpoint streaming backend container logs (tail 50 + follow)."""
+    def generate():
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.connect(DOCKER_SOCK)
+        except Exception as e:
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            return
+
+        path = (
+            f'/containers/{BACKEND_CONTAINER}/logs'
+            '?stdout=1&stderr=1&tail=50&follow=1'
+        )
+        sock.sendall(
+            f'GET {path} HTTP/1.0\r\nHost: localhost\r\n\r\n'.encode()
+        )
+
+        # Read HTTP response headers
+        header_buf = b''
+        while b'\r\n\r\n' not in header_buf:
+            chunk = sock.recv(4096)
+            if not chunk:
+                yield f"data: {json.dumps({'error': 'Connection closed'})}\n\n"
+                sock.close()
+                return
+            header_buf += chunk
+
+        status_line = header_buf[:header_buf.index(b'\r\n')].decode()
+        if ' 200 ' not in status_line:
+            yield f"data: {json.dumps({'error': status_line})}\n\n"
+            sock.close()
+            return
+
+        idx = header_buf.index(b'\r\n\r\n') + 4
+        buf = header_buf[idx:]
+
+        # Parse Docker multiplexed stream frames (8-byte header + payload)
+        while True:
+            while len(buf) >= 8:
+                frame_size = struct.unpack('>I', buf[4:8])[0]
+                total = 8 + frame_size
+                if len(buf) < total:
+                    break
+                line = buf[8:total].decode('utf-8', errors='replace').rstrip('\n')
+                buf = buf[total:]
+                yield f"data: {json.dumps(line)}\n\n"
+
+            try:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+            except Exception:
+                break
+
+        sock.close()
+
+    return Response(
+        generate(),
+        mimetype='text/event-stream',
+        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
+    )
 
 
 if __name__ == '__main__':
