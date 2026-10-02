@@ -12,10 +12,12 @@ ctranslate2>=4.0.0
 sentencepiece==0.1.99
 protobuf==4.25.1
 sacremoses==0.1.1
+pillow==10.2.0          # CLIP vision path (tag_videos_v2.py) needs PIL.Image
 
 # Utilities
 tqdm==4.66.1
 ffmpeg-python==0.2.0
+langdetect==1.0.9
 
 # Logging
 coloredlogs==15.0.1

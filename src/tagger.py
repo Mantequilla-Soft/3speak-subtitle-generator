@@ -1,169 +1,232 @@
 """
 Content Tagger
-Analyzes video transcripts and assigns relevant tags using zero-shot classification
+
+Combines two sources of evidence:
+
+  1. Author-supplied Hive tags and the Hive community, mapped onto our taxonomy.
+     Human-authored and high precision — treated as fact, never overridden.
+  2. Zero-shot classification (bart-large-mnli) over title + summary + post body.
+
+The classifier is only ever allowed to *add* tags. It runs on English text
+(the generated summary where available) because bart-large-mnli is English-only,
+and its raw scores are uncalibrated, so each label carries its own threshold
+plus a relative cutoff against the top-scoring label.
 """
 
 import logging
-from typing import List, Dict, Any
+from typing import Any, Dict, List, Optional
+
 from transformers import pipeline
-import torch
+
+from tag_taxonomy import (
+    apply_implications,
+    clean_post_body,
+    exclusive_tags_for,
+    tags_from_category,
+    tags_from_hive_tags,
+    topical_hive_tags,
+)
 
 logger = logging.getLogger(__name__)
 
+# Marks tags decided outright by a single-topic community, with no classifier.
+COMMUNITY_RULE_MODEL = 'community-rule'
+
 
 class ContentTagger:
-    """Handles video content tagging using zero-shot classification"""
+    """Video content tagging: Hive metadata evidence + zero-shot classification."""
 
     def __init__(self, config: dict):
-        """Initialize zero-shot classification model"""
         self.config = config
         self.tags_list = config['tags']
-        self.max_tags = config['tagging']['max_tags']
-        self.min_confidence = config['tagging']['min_confidence']
-        self.use_sample = config['tagging']['use_transcript_sample']
-        self.sample_duration = config['tagging']['sample_duration']
 
+        tagging = config['tagging']
+        self.max_tags = tagging['max_tags']
+        self.min_confidence = tagging['min_confidence']
+        self.relative_ratio = tagging.get('relative_ratio', 0.6)
+        self.label_thresholds = tagging.get('label_thresholds', {}) or {}
+        self.hypothesis_template = tagging.get(
+            'hypothesis_template', 'This video is about {}.'
+        )
+        self.use_sample = tagging['use_transcript_sample']
+        self.sample_duration = tagging['sample_duration']
+        self.content_chars = tagging.get('content_chars', 1500)
+        self.body_chars = tagging.get('body_chars', 1200)
+        self.fallback_confidence = tagging.get('fallback_confidence', 0.5)
+
+        model_cfg = config['models']['tagging']
+        self.model_name = model_cfg['model']
+        # Overridable so the tagger can be exercised outside the container,
+        # where /app/models does not exist.
+        self.cache_dir = model_cfg.get('cache_dir', '/app/models')
         self.classifier = None
         self._load_model()
 
     def _load_model(self):
-        """Load zero-shot classification model"""
         try:
-            model_name = self.config['models']['tagging']['model']
-            logger.info(f"Loading tagging model: {model_name}")
-
+            logger.info(f"Loading tagging model: {self.model_name}")
             self.classifier = pipeline(
                 "zero-shot-classification",
-                model=model_name,
+                model=self.model_name,
                 device=-1,  # CPU
-                model_kwargs={"cache_dir": "/app/models"}
+                model_kwargs={"cache_dir": self.cache_dir},
             )
-
             logger.info("Tagging model loaded successfully")
-
         except Exception as e:
             logger.error(f"Failed to load tagging model: {e}")
             raise
 
-    def generate_tags(self, transcript: str, segments: List[Any] = None, post_content: str = None) -> List[str]:
+    def _threshold_for(self, label: str) -> float:
+        """Per-label threshold, falling back to the global minimum."""
+        return float(self.label_thresholds.get(label, self.min_confidence))
+
+    def build_classifier_input(
+        self,
+        metadata: Optional[Dict[str, Any]] = None,
+        content_text: str = '',
+    ) -> str:
         """
-        Generate content tags from video transcript and optional Hive post content
+        Assemble the text handed to the classifier.
+
+        bart-large-mnli truncates at 1024 tokens, so the highest-signal fields go
+        first: title, then the author's own topical tags, then the summary, and
+        finally the post body.
+        """
+        metadata = metadata or {}
+        parts: List[str] = []
+
+        title = (metadata.get('title') or '').strip()
+        if title:
+            parts.append(f"Title: {title}")
+
+        # Unmappable author tags ("ac_origin", "bayek") are still topical evidence.
+        author_tags = topical_hive_tags(metadata.get('hive_tags'))
+        if author_tags:
+            parts.append(f"Tags: {', '.join(author_tags[:12])}")
+
+        if content_text and content_text.strip():
+            parts.append(content_text.strip()[: self.content_chars])
+
+        body = clean_post_body(metadata.get('body') or '', self.body_chars)
+        if body:
+            parts.append(body)
+
+        return "\n".join(parts).strip()
+
+    def classify(self, text: str) -> Dict[str, float]:
+        """Zero-shot scores for every taxonomy label. Empty dict on failure."""
+        if not text.strip():
+            return {}
+        result = self.classifier(
+            text,
+            candidate_labels=self.tags_list,
+            multi_label=True,
+            hypothesis_template=self.hypothesis_template,
+            batch_size=16,
+        )
+        return dict(zip(result['labels'], result['scores']))
+
+    def generate_tags(
+        self,
+        transcript: str = '',
+        segments: Optional[List[Any]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        content_text: str = '',
+    ) -> Dict[str, Any]:
+        """
+        Generate tags for a video.
 
         Args:
-            transcript: Full transcript text
-            segments: Optional list of segments for sampling
-            post_content: Optional Hive post body (title + body text)
+            transcript: Source-language transcript (fallback content only).
+            segments: Transcript segments, used to sample the opening minutes.
+            metadata: Output of `video_meta.normalize_video_metadata`.
+            content_text: Preferred English text (summary_en or translated
+                transcript). Falls back to the transcript sample when absent.
 
         Returns:
-            List of relevant tags
+            {'tags': [...], 'evidence': [...], 'scores': {...}, 'model': str}
         """
-        try:
-            # Sample transcript if needed
+        metadata = metadata or {}
+
+        # 0. Single-topic community: membership decides the tags outright. No
+        #    classifier, no transcript, and no extra tags bolted on — these
+        #    communities are unambiguous, so anything else is noise.
+        exclusive = exclusive_tags_for(metadata.get('category'))
+        if exclusive:
+            tags = exclusive[: self.max_tags]
+            logger.info(f"Tags: {', '.join(tags)} [community rule]")
+            return {
+                'tags': tags,
+                'evidence': tags,
+                'scores': {},
+                'model': COMMUNITY_RULE_MODEL,
+            }
+
+        # 1. Author-supplied evidence. Trusted; never filtered by the classifier.
+        evidence = tags_from_hive_tags(metadata.get('hive_tags'))
+        evidence |= tags_from_category(metadata.get('category'))
+
+        # 2. Choose the text to classify. English is strongly preferred.
+        if not content_text:
             if self.use_sample and segments:
-                sampled_text = self._sample_transcript(segments)
+                content_text = self._sample_transcript(segments)
             else:
-                # Use first 1500 characters to leave room for post content
-                sampled_text = transcript[:1500]
+                content_text = transcript or ''
 
-            # Combine with Hive post content when available
-            if post_content and post_content.strip():
-                if sampled_text.strip():
-                    # Both sources available — interleave so neither dominates
-                    combined_text = f"{post_content[:1500]}\n\n{sampled_text}"
-                else:
-                    # No speech — rely entirely on the post body
-                    combined_text = post_content[:3000]
-                    logger.info("Transcript empty; using Hive post content for tagging")
-                sampled_text = combined_text
-            elif not sampled_text.strip():
-                logger.warning("Empty transcript and no post content, returning default tags")
-                return ['vlog', 'general']
+        text = self.build_classifier_input(metadata, content_text)
 
-            logger.info("Analyzing content for tags...")
+        scores: Dict[str, float] = {}
+        if text:
+            try:
+                scores = self.classify(text)
+            except Exception as e:
+                logger.error(f"Zero-shot classification failed: {e}")
+        else:
+            logger.info("No text available for classification; using Hive evidence only")
 
-            # Perform zero-shot classification
-            # batch_size batches NLI pairs together: 40 labels / 16 = ~3 forward
-            # passes instead of 40, giving ~10x speedup on CPU
-            result = self.classifier(
-                sampled_text,
-                candidate_labels=self.tags_list,
-                multi_label=True,
-                batch_size=16
-            )
+        # 3. Accept a classifier label only if it clears its own threshold *and*
+        #    is close enough to the top label. Both guards are needed: the first
+        #    kills known attractors ('news'), the second kills the long tail on
+        #    videos where one topic clearly dominates.
+        accepted: List[str] = []
+        if scores:
+            top_score = max(scores.values())
+            floor = self.relative_ratio * top_score
+            ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+            accepted = [
+                label
+                for label, score in ranked
+                if score >= self._threshold_for(label) and score >= floor
+            ]
 
-            # Filter by confidence and get top tags
-            tags = []
-            for label, score in zip(result['labels'], result['scores']):
-                if score >= self.min_confidence and len(tags) < self.max_tags:
-                    tags.append(label)
+        # 4. Merge: evidence first (ordered by classifier score when we have one),
+        #    then accepted classifier labels. No padding to max_tags.
+        evidence_ordered = sorted(evidence, key=lambda t: -scores.get(t, 0.0))
+        tags = evidence_ordered + [t for t in accepted if t not in evidence]
 
-            # Ensure at least one tag
-            if not tags:
-                tags = [result['labels'][0]]  # Take highest scoring tag
+        # 5. Last resort: a single confident label rather than an empty list.
+        if not tags and scores:
+            top_label, top_score = max(scores.items(), key=lambda kv: kv[1])
+            if top_score >= self.fallback_confidence:
+                tags = [top_label]
 
-            logger.info(f"Generated tags: {', '.join(tags)}")
-            return tags
+        # 6. Expand entailed tags ('tutorial' implies 'education') before the cap,
+        #    so an implied tag can displace a weaker classifier tag.
+        tags = apply_implications(tags)[: self.max_tags]
 
-        except Exception as e:
-            logger.error(f"Tag generation failed: {e}")
-            # Return safe default tags
-            return ['general', 'video']
+        logger.info(
+            f"Tags: {', '.join(tags) or '(none)'} "
+            f"[evidence: {', '.join(sorted(evidence)) or 'none'}]"
+        )
+        return {
+            'tags': tags,
+            'evidence': sorted(evidence),
+            'scores': {k: round(v, 4) for k, v in scores.items()},
+            'model': self.model_name,
+        }
 
     def _sample_transcript(self, segments: List[Any]) -> str:
-        """
-        Sample transcript from first N seconds
-
-        Args:
-            segments: List of transcript segments
-
-        Returns:
-            Sampled transcript text
-        """
-        sampled_segments = [
-            seg for seg in segments
-            if seg.start < self.sample_duration
-        ]
-
-        return ' '.join(seg.text for seg in sampled_segments)
-
-    def get_tag_scores(self, transcript: str) -> Dict[str, float]:
-        """
-        Get all tags with their confidence scores
-
-        Args:
-            transcript: Transcript text
-
-        Returns:
-            Dictionary mapping tags to confidence scores
-        """
-        try:
-            sampled_text = transcript[:3000]
-
-            result = self.classifier(
-                sampled_text,
-                candidate_labels=self.tags_list,
-                multi_label=True
-            )
-
-            return dict(zip(result['labels'], result['scores']))
-
-        except Exception as e:
-            logger.error(f"Failed to get tag scores: {e}")
-            return {}
-
-    def add_custom_tags(self, tags: List[str], custom_tags: List[str]) -> List[str]:
-        """
-        Add custom tags to existing tag list
-
-        Args:
-            tags: Existing tags
-            custom_tags: Custom tags to add
-
-        Returns:
-            Combined tag list
-        """
-        combined = tags.copy()
-        for tag in custom_tags:
-            if tag not in combined and len(combined) < self.max_tags + 2:
-                combined.append(tag)
-        return combined
+        """Transcript text from the first `sample_duration` seconds."""
+        return ' '.join(
+            seg.text for seg in segments if seg.start < self.sample_duration
+        )

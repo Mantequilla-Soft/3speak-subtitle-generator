@@ -1,0 +1,15 @@
+[Unit]
+Description=Run the 3Speak leaderboard rollup hourly
+Requires=3speak-leaderboard.service
+
+[Timer]
+# Hourly, a few minutes past the hour so it isn't competing with everything
+# else that fires exactly on :00.
+OnCalendar=*:07
+# If the box was off when a run was due, do it on the next boot rather than
+# silently skipping the window.
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

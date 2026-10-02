@@ -4,10 +4,13 @@ Fast CPU translation using Facebook's NLLB-200 model via CTranslate2 int8 infere
 """
 
 import os
+import re
 import logging
 from typing import List, Dict, Any
 import ctranslate2
 from transformers import AutoTokenizer
+
+_SENT_SPLIT_RE = re.compile(r'(?<=[.!?。！？])\s+')
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +78,52 @@ class Translator:
             compute_type=compute_type,
         )
         logger.info("CTranslate2 translation model loaded successfully")
+
+    def translate_text(self, text: str, source_lang: str, target_lang: str) -> str:
+        """Translate a single short string (title, summary, etc.)."""
+        if not text or not text.strip():
+            return ''
+        if source_lang == target_lang:
+            return text
+        out = self.translate_segments(
+            [{'start': 0, 'end': 0, 'text': text}],
+            source_lang, target_lang,
+        )
+        return out[0]['text'] if out else ''
+
+    def translate_long_text(self, text: str, source_lang: str, target_lang: str,
+                            chunk_chars: int = 400) -> str:
+        """
+        Translate a long passage by grouping full sentences into ~chunk_chars-sized
+        batches before sending to NLLB. Preserves sentence flow so the output reads
+        as natural English (instead of the chopped subtitle-style output you get
+        from translating per-segment).
+        """
+        if not text or not text.strip():
+            return ''
+        if source_lang == target_lang:
+            return text
+
+        sentences = [s for s in _SENT_SPLIT_RE.split(text.strip()) if s]
+        chunks: List[str] = []
+        current = ''
+        for s in sentences:
+            if not current:
+                current = s
+            elif len(current) + len(s) + 1 <= chunk_chars:
+                current = current + ' ' + s
+            else:
+                chunks.append(current)
+                current = s
+        if current:
+            chunks.append(current)
+
+        if not chunks:
+            return ''
+
+        segments = [{'start': 0, 'end': 0, 'text': c} for c in chunks]
+        translated = self.translate_segments(segments, source_lang, target_lang)
+        return ' '.join(s.get('text', '') for s in translated).strip()
 
     def translate_segments(self, segments: List[Dict[str, Any]],
                           source_lang: str, target_lang: str) -> List[Dict[str, Any]]:

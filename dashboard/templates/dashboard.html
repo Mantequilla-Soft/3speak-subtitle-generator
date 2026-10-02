@@ -523,6 +523,15 @@
         </div>
     </div>
 
+    <div style="margin-bottom: 32px;">
+        <div class="chart-box">
+            <h3>Tags by Content Type</h3>
+            <div style="width: 100%; max-height: 400px;">
+                <canvas id="tagChart"></canvas>
+            </div>
+        </div>
+    </div>
+
     <div class="mgmt-row">
         <!-- Videos panel -->
         <div class="mgmt-panel">
@@ -638,7 +647,7 @@
         <h2>Video Activity</h2>
         <div style="display:flex; border-bottom:1px solid #30363d;">
             <button class="mgmt-tab active" id="tabPending" onclick="switchActivityTab('pending')">
-                Pending ({{ pending_items|length }})
+                Pending ({{ pending }})
             </button>
             <button class="mgmt-tab" id="tabProcessed" onclick="switchActivityTab('processed')">
                 Processed ({{ total_processed }})
@@ -655,44 +664,15 @@
                         <th>Date</th>
                     </tr>
                 </thead>
-                <tbody>
-                    {% for doc in pending_items %}
-                    <tr>
-                        <td>
-                            <span class="badge badge-{{ doc.state }}">{{ doc.state }}</span>
-                        </td>
-                        <td>
-                            {% if doc.get('isEmbed') %}
-                            <a href="https://preview.3speak.tv/shorts?v={{ doc.author }}/{{ doc.permlink }}" target="_blank" style="color: #e1e4e8; text-decoration: none;">
-                            {% else %}
-                            <a href="https://preview.3speak.tv/@{{ doc.author }}/{{ doc.permlink }}" target="_blank" style="color: #e1e4e8; text-decoration: none;">
-                            {% endif %}
-                                <strong>{{ doc.author }}</strong>/{{ doc.permlink }}
-                            </a>
-                        </td>
-                        <td>
-                            {% if doc.get('isAudio') %}
-                            <span class="badge badge-audio">audio</span>
-                            {% elif doc.get('isEmbed') %}
-                            <span class="badge badge-embed">embed</span>
-                            {% else %}
-                            <span class="badge badge-legacy">legacy</span>
-                            {% endif %}
-                        </td>
-                        <td class="timestamp">
-                            {% if doc.display_date %}
-                                {{ doc.display_date.strftime('%Y-%m-%d %H:%M') }}
-                            {% else %}
-                                -
-                            {% endif %}
-                        </td>
-                    </tr>
-                    {% endfor %}
+                <tbody id="pendingTbody">
                 </tbody>
             </table>
-            {% if not pending_items %}
-            <p style="text-align:center; color:#6e7681; padding:24px 0;">No pending videos</p>
-            {% endif %}
+            <div id="pendingEmpty" style="text-align:center; color:#6e7681; padding:24px 0; display:none;">No pending videos</div>
+            <div style="display:flex; justify-content:center; align-items:center; gap:12px; padding:12px 0;">
+                <button class="btn btn-sm" id="pendingPrev" style="background:#21262d; border:1px solid #30363d; color:#8b949e;" onclick="loadPendingPage(pendingCurrentPage - 1)" disabled>&larr; Prev</button>
+                <span id="pendingPageInfo" style="color:#8b949e; font-size:0.85rem;">Page 1</span>
+                <button class="btn btn-sm" id="pendingNext" style="background:#21262d; border:1px solid #30363d; color:#8b949e;" onclick="loadPendingPage(pendingCurrentPage + 1)">Next &rarr;</button>
+            </div>
         </div>
 
         <div id="activityProcessed" style="display:none;">
@@ -778,8 +758,10 @@
                     {% endfor %}
                 </tbody>
             </table>
-            <div style="text-align:center; padding:16px;">
-                <button class="btn btn-sm" id="loadMoreBtn" style="background:#21262d; border:1px solid #30363d; color:#8b949e;" onclick="loadMoreProcessed()">Load more</button>
+            <div style="display:flex; justify-content:center; align-items:center; gap:12px; padding:12px 0;">
+                <button class="btn btn-sm" id="processedPrev" style="background:#21262d; border:1px solid #30363d; color:#8b949e;" onclick="loadProcessedPage(processedCurrentPage - 1)" disabled>&larr; Prev</button>
+                <span id="processedPageInfo" style="color:#8b949e; font-size:0.85rem;">Page 1</span>
+                <button class="btn btn-sm" id="processedNext" style="background:#21262d; border:1px solid #30363d; color:#8b949e;" onclick="loadProcessedPage(processedCurrentPage + 1)">Next &rarr;</button>
             </div>
         </div>
     </div>
@@ -875,29 +857,76 @@
             document.getElementById('tabProcessed').classList.toggle('active', tab === 'processed');
         }
 
-        // Load more processed videos
-        var processedPage = 1;
-        function loadMoreProcessed() {
-            processedPage++;
-            var btn = document.getElementById('loadMoreBtn');
-            btn.textContent = 'Loading...';
-            btn.disabled = true;
-
-            fetch('/api/processed?page=' + processedPage)
+        // Pending pagination
+        var pendingCurrentPage = 1;
+        function loadPendingPage(page) {
+            if (page < 1) return;
+            fetch('/api/pending?page=' + page + '&per_page=50')
                 .then(function(r) { return r.json(); })
                 .then(function(data) {
+                    pendingCurrentPage = data.page;
+                    var tbody = document.getElementById('pendingTbody');
+                    tbody.innerHTML = '';
+                    var empty = document.getElementById('pendingEmpty');
+                    if (data.items.length === 0) {
+                        empty.style.display = '';
+                    } else {
+                        empty.style.display = 'none';
+                        data.items.forEach(function(doc) {
+                            var tr = document.createElement('tr');
+                            tr.innerHTML = renderPendingRow(doc);
+                            tbody.appendChild(tr);
+                        });
+                    }
+                    var totalPages = Math.ceil(data.total / 50) || 1;
+                    document.getElementById('pendingPageInfo').textContent = 'Page ' + data.page + ' / ' + totalPages;
+                    document.getElementById('pendingPrev').disabled = data.page <= 1;
+                    document.getElementById('pendingNext').disabled = !data.has_more;
+                    // Update tab header with accurate count
+                    document.getElementById('tabPending').innerHTML = 'Pending (' + data.total + ')';
+                });
+        }
+
+        function renderPendingRow(doc) {
+            var link = doc.isEmbed
+                ? 'https://preview.3speak.tv/shorts?v=' + doc.author + '/' + doc.permlink
+                : 'https://preview.3speak.tv/@' + doc.author + '/' + doc.permlink;
+            var typeBadge = doc.isAudio ? '<span class="badge badge-audio">audio</span>' :
+                            doc.isEmbed ? '<span class="badge badge-embed">embed</span>' :
+                            '<span class="badge badge-legacy">legacy</span>';
+            var dateStr = '-';
+            if (doc.display_date) {
+                var dt = new Date(doc.display_date);
+                dateStr = dt.toISOString().slice(0, 16).replace('T', ' ');
+            }
+            return '<td><span class="badge badge-' + doc.state + '">' + doc.state + '</span></td>' +
+                '<td><a href="' + link + '" target="_blank" style="color:#e1e4e8;text-decoration:none;"><strong>' + doc.author + '</strong>/' + doc.permlink + '</a></td>' +
+                '<td>' + typeBadge + '</td>' +
+                '<td class="timestamp">' + dateStr + '</td>';
+        }
+
+        // Load first page on init
+        loadPendingPage(1);
+
+        // Processed pagination
+        var processedCurrentPage = 1;
+        function loadProcessedPage(page) {
+            if (page < 1) return;
+            fetch('/api/processed?page=' + page + '&per_page=50')
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    processedCurrentPage = data.page;
                     var tbody = document.getElementById('processedTbody');
+                    tbody.innerHTML = '';
                     data.items.forEach(function(doc) {
                         var tr = document.createElement('tr');
                         tr.innerHTML = renderProcessedRow(doc);
                         tbody.appendChild(tr);
                     });
-                    if (!data.has_more) {
-                        btn.style.display = 'none';
-                    } else {
-                        btn.textContent = 'Load more';
-                        btn.disabled = false;
-                    }
+                    var totalPages = Math.ceil((data.total || {{ total_processed }}) / 50) || 1;
+                    document.getElementById('processedPageInfo').textContent = 'Page ' + data.page + ' / ' + totalPages;
+                    document.getElementById('processedPrev').disabled = data.page <= 1;
+                    document.getElementById('processedNext').disabled = !data.has_more;
                 });
         }
 
@@ -1026,10 +1055,63 @@
 
         // Progress donut
         makeDonut('progressChart',
-            ['Processed', 'Pending'],
-            [{{ total_processed }}, {{ pending }}],
-            ['#3fb950', '#d29922']
+            ['Processed', 'Pending', 'Skipped'],
+            [{{ total_processed }}, {{ pending }}, {{ total_skipped }}],
+            ['#3fb950', '#d29922', '#6e7681']
         );
+
+        // Tags stacked bar chart
+        (function() {
+            const tagLabels = [{% for tag, counts in tag_distribution %}'{{ tag }}',{% endfor %}];
+            const tagLegacy = [{% for tag, counts in tag_distribution %}{{ counts.legacy }},{% endfor %}];
+            const tagEmbed  = [{% for tag, counts in tag_distribution %}{{ counts.embed }},{% endfor %}];
+            const tagAudio  = [{% for tag, counts in tag_distribution %}{{ counts.audio }},{% endfor %}];
+
+            new Chart(document.getElementById('tagChart'), {
+                type: 'bar',
+                data: {
+                    labels: tagLabels,
+                    datasets: [
+                        { label: 'Legacy', data: tagLegacy, backgroundColor: '#3fb950' },
+                        { label: 'Embed',  data: tagEmbed,  backgroundColor: '#bc8cff' },
+                        { label: 'Audio',  data: tagAudio,  backgroundColor: '#d29922' },
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: true,
+                    scales: {
+                        x: {
+                            stacked: true,
+                            grid: { color: '#21262d' },
+                            ticks: { color: '#8b949e', font: { size: 11 } }
+                        },
+                        y: {
+                            stacked: true,
+                            grid: { color: '#21262d' },
+                            ticks: { color: '#8b949e' },
+                            beginAtZero: true
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            position: 'top',
+                            labels: { padding: 16, usePointStyle: true, pointStyleWidth: 10, font: { size: 12 } }
+                        },
+                        tooltip: {
+                            callbacks: {
+                                afterTitle: function(items) {
+                                    const idx = items[0].dataIndex;
+                                    const total = tagLegacy[idx] + tagEmbed[idx] + tagAudio[idx];
+                                    return 'Total: ' + total;
+                                }
+                            }
+                        }
+                    },
+                    animation: { duration: 600 }
+                }
+            });
+        })();
 
         // Priority queue
         function loadQueue() {

@@ -39,6 +39,7 @@ blacklist_authors_col = db[config['mongodb'].get('collection_blacklist_authors',
 priority_creators_col = db[config['mongodb'].get('collection_priority_creators', 'subtitles-priority-creators')]
 hotwords_col = db[config['mongodb'].get('collection_hotwords', 'subtitles-hotwords')]
 corrections_col = db[config['mongodb'].get('collection_corrections', 'subtitles-corrections')]
+failures_col = db[config['mongodb'].get('collection_failures', 'subtitles-failures')]
 
 REFRESH_INTERVAL = config.get('dashboard', {}).get('refresh_interval', 15)
 DASHBOARD_PASSWORD = config.get('dashboard', {}).get('password', '')
@@ -99,8 +100,8 @@ def get_system_metrics():
 
 def get_stats():
     """Gather all dashboard statistics from MongoDB."""
-    # Total processed videos (documents in subtitles collection)
-    total_processed = subtitles_col.count_documents({})
+    # Total subtitle documents (used for subtitle file count, not video count)
+    total_subtitle_docs = subtitles_col.count_documents({})
 
     # Total subtitle files (sum of all language keys across all docs)
     pipeline_total_subs = [
@@ -145,15 +146,63 @@ def get_stats():
     total_audio = embed_audio_col.count_documents(audio_query)
     total_available = total_legacy + total_embed + total_audio
 
-    # Processed counts by type
-    processed_audio = subtitles_col.count_documents({'isAudio': True})
-    processed_embed = subtitles_col.count_documents({'isEmbed': True, 'isAudio': {'$ne': True}})
-    processed_legacy = total_processed - processed_embed - processed_audio
+    # Collect all source video keys
+    all_source_keys = set()
+    source_legacy_keys = set()
+    source_embed_keys = set()
+    source_audio_keys = set()
+    for v in videos_col.find(legacy_query, {'owner': 1, 'permlink': 1, '_id': 0}):
+        key = (v['owner'], v['permlink'])
+        all_source_keys.add(key)
+        source_legacy_keys.add(key)
+    for v in embed_col.find(embed_query, {'owner': 1, 'permlink': 1, '_id': 0}):
+        key = (v['owner'], v['permlink'])
+        all_source_keys.add(key)
+        source_embed_keys.add(key)
+    for v in embed_audio_col.find(audio_query, {'owner': 1, 'permlink': 1, '_id': 0}):
+        key = (v['owner'], v['permlink'])
+        all_source_keys.add(key)
+        source_audio_keys.add(key)
 
-    pending_legacy = max(0, total_legacy - processed_legacy)
-    pending_embed = max(0, total_embed - processed_embed)
-    pending_audio = max(0, total_audio - processed_audio)
-    pending = pending_legacy + pending_embed + pending_audio
+    # Build exclude set: same logic as subtitle-generator service (single source of truth)
+    target_languages = config.get('languages', [])
+    lang_codes = [l['code'] for l in target_languages] if target_languages else ['en']
+    fully_done_query = {f'subtitles.{code}': {'$exists': True} for code in lang_codes}
+    fully_done_keys = {
+        (d['author'], d['permlink'])
+        for d in subtitles_col.find(fully_done_query, {'author': 1, 'permlink': 1, '_id': 0})
+    }
+    max_retries = config.get('processing', {}).get('max_retries', 3)
+    max_failed_keys = {
+        (d['author'], d['permlink'])
+        for d in failures_col.find({'count': {'$gte': max_retries}}, {'author': 1, 'permlink': 1, '_id': 0})
+    }
+    blacklisted_video_keys = {
+        (d['author'], d['permlink'])
+        for d in blacklist_col.find({}, {'author': 1, 'permlink': 1, '_id': 0})
+    }
+    blacklisted_author_set = {
+        d['author'] for d in blacklist_authors_col.find({}, {'author': 1, '_id': 0})
+    }
+    # Videos skipped due to author blacklist
+    author_bl_keys = {k for k in all_source_keys if k[0] in blacklisted_author_set}
+
+    exclude_keys = fully_done_keys | max_failed_keys | blacklisted_video_keys | author_bl_keys
+    skipped_keys = (max_failed_keys | blacklisted_video_keys | author_bl_keys) & all_source_keys
+    total_skipped = len(skipped_keys)
+
+    # Processed = fully done (all languages)
+    processed_keys = fully_done_keys & all_source_keys
+    processed_audio = len(source_audio_keys & processed_keys)
+    processed_embed = len((source_embed_keys - source_audio_keys) & processed_keys)
+    processed_legacy = len(source_legacy_keys & processed_keys)
+
+    # Pending = source videos not excluded by any reason
+    pending_keys = all_source_keys - exclude_keys
+    pending_legacy = len(source_legacy_keys & pending_keys)
+    pending_embed = len((source_embed_keys - source_audio_keys) & pending_keys)
+    pending_audio = len(source_audio_keys & pending_keys)
+    pending = len(pending_keys)
 
     # === Build unified recent activity list ===
     recent = []
@@ -255,23 +304,12 @@ def get_stats():
         key=lambda v: v.get('video_created_at') or datetime.min, reverse=True
     )
 
-    # Batch-check which candidates are already processed
-    if source_candidates:
-        or_conds = [
-            {'author': sv['author'], 'permlink': sv['permlink']}
-            for sv in source_candidates
-        ]
-        processed_pairs = {
-            (d['author'], d['permlink'])
-            for d in subtitles_col.find({'$or': or_conds}, {'author': 1, 'permlink': 1, '_id': 0})
-        }
-    else:
-        processed_pairs = set()
-
     pending_entries = []
     for sv in source_candidates:
         pair = (sv['author'], sv['permlink'])
-        if pair in processed_pairs or pair in prio_set or pair == processing_pair:
+        if pair in exclude_keys or pair in prio_set or pair == processing_pair:
+            continue
+        if sv['author'] in blacklisted_author_set:
             continue
         sv['state'] = 'prioritized' if sv['author'] in priority_creators else 'pending'
         sv['languages'] = []
@@ -285,7 +323,35 @@ def get_stats():
     pending_items = [r for r in recent if r['state'] != 'complete']
     processed_items = [r for r in recent if r['state'] == 'complete']
 
+    # --- Tag distribution by content type ---
+    tag_type_counts = {}  # {tag: {legacy: N, embed: N, audio: N}}
+    tag_cursor = tags_col.find({}, {'author': 1, 'permlink': 1, 'tags': 1, '_id': 0})
+    # Build a quick lookup from subtitles collection for content type
+    sub_type_lookup = {}
+    for sd in subtitles_col.find({}, {'author': 1, 'permlink': 1, 'isEmbed': 1, 'isAudio': 1, '_id': 0}):
+        sub_type_lookup[(sd['author'], sd['permlink'])] = (
+            'audio' if sd.get('isAudio') else ('embed' if sd.get('isEmbed') else 'legacy')
+        )
+    for td in tag_cursor:
+        key = (td['author'], td['permlink'])
+        content_type = sub_type_lookup.get(key, 'legacy')
+        for tag in (td.get('tags') or '').split(','):
+            tag = tag.strip()
+            if not tag:
+                continue
+            if tag not in tag_type_counts:
+                tag_type_counts[tag] = {'legacy': 0, 'embed': 0, 'audio': 0}
+            tag_type_counts[tag][content_type] += 1
+    # Sort tags by total count descending
+    tag_distribution = sorted(
+        tag_type_counts.items(),
+        key=lambda x: sum(x[1].values()),
+        reverse=True,
+    )
+
     system = get_system_metrics()
+
+    total_processed = len(processed_keys)
 
     return {
         'total_processed': total_processed,
@@ -302,11 +368,13 @@ def get_stats():
         'pending_legacy': pending_legacy,
         'pending_embed': pending_embed,
         'pending_audio': pending_audio,
+        'total_skipped': total_skipped,
         'start_date': start_date_str or 'all',
         'lang_counts': lang_counts,
         'recent': recent,
         'pending_items': pending_items,
         'processed_items': processed_items,
+        'tag_distribution': tag_distribution,
         'refresh_interval': REFRESH_INTERVAL,
         'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         **system,
@@ -327,6 +395,10 @@ def api_stats():
         for key in ('created_at', 'updated_at', 'video_created_at', 'display_date'):
             if key in doc and isinstance(doc[key], datetime):
                 doc[key] = doc[key].isoformat()
+    # Convert tag_distribution tuples to dicts for JSON
+    stats['tag_distribution'] = [
+        {'tag': tag, **counts} for tag, counts in stats['tag_distribution']
+    ]
     return jsonify(stats)
 
 
@@ -710,6 +782,124 @@ def api_processed():
     return jsonify({
         'items': items,
         'page': page,
+        'total': total,
+        'has_more': skip + len(items) < total,
+    })
+
+
+@app.route('/api/pending')
+def api_pending():
+    page = int(request.args.get('page', 1))
+    per_page = min(int(request.args.get('per_page', 50)), 100)
+
+    # Build source queries (same as get_stats)
+    legacy_query = {
+        'filename': {'$exists': True, '$nin': [None, ''], '$regex': '^ipfs://'},
+        'status': 'published'
+    }
+    embed_query = {
+        'manifest_cid': {'$exists': True, '$nin': [None, '']},
+        'status': 'published'
+    }
+    audio_query = {
+        'audio_cid': {'$exists': True, '$nin': [None, '']},
+        'status': 'published'
+    }
+    if START_DATE:
+        legacy_query['created'] = {'$gte': START_DATE}
+        embed_query['createdAt'] = {'$gte': START_DATE}
+        audio_query['createdAt'] = {'$gte': START_DATE}
+
+    # Build exclude set: same logic as subtitle-generator service
+    # 1. Fully processed (all target languages present)
+    target_languages = config.get('languages', [])
+    lang_codes = [l['code'] for l in target_languages] if target_languages else ['en']
+    fully_done_query = {f'subtitles.{code}': {'$exists': True} for code in lang_codes}
+    fully_done = {
+        (d['author'], d['permlink'])
+        for d in subtitles_col.find(fully_done_query, {'author': 1, 'permlink': 1, '_id': 0})
+    }
+    # 2. Max-failed
+    max_retries = config.get('processing', {}).get('max_retries', 3)
+    max_failed = {
+        (d['author'], d['permlink'])
+        for d in failures_col.find({'count': {'$gte': max_retries}}, {'author': 1, 'permlink': 1, '_id': 0})
+    }
+    # 3. Blacklisted videos
+    blacklisted_videos = {
+        (d['author'], d['permlink'])
+        for d in blacklist_col.find({}, {'author': 1, 'permlink': 1, '_id': 0})
+    }
+    # 4. Blacklisted authors
+    blacklisted_author_set = {
+        d['author'] for d in blacklist_authors_col.find({}, {'author': 1, '_id': 0})
+    }
+    exclude_pairs = fully_done | max_failed | blacklisted_videos
+
+    # Currently processing
+    processing_doc = status_col.find_one({})
+    processing_pair = (
+        (processing_doc['author'], processing_doc['permlink'])
+        if processing_doc else None
+    )
+
+    # Priority queue
+    prio_set = {
+        (p['author'], p['permlink'])
+        for p in priority_col.find({}, {'author': 1, 'permlink': 1, '_id': 0})
+    }
+
+    # Priority creators
+    priority_creators = {
+        doc['author']
+        for doc in priority_creators_col.find({}, {'author': 1, '_id': 0})
+    }
+
+    # Gather ALL source videos sorted by date descending
+    candidates = []
+    for v in videos_col.find(legacy_query, {'owner': 1, 'permlink': 1, 'created': 1, '_id': 0}).sort('created', -1):
+        candidates.append({
+            'author': v['owner'], 'permlink': v['permlink'],
+            'isEmbed': False, 'isAudio': False,
+            'display_date': v.get('created'),
+        })
+    for v in embed_col.find(embed_query, {'owner': 1, 'permlink': 1, 'createdAt': 1, '_id': 0}).sort('createdAt', -1):
+        candidates.append({
+            'author': v['owner'], 'permlink': v['permlink'],
+            'isEmbed': True, 'isAudio': False,
+            'display_date': v.get('createdAt'),
+        })
+    for v in embed_audio_col.find(audio_query, {'owner': 1, 'permlink': 1, 'createdAt': 1, '_id': 0}).sort('createdAt', -1):
+        candidates.append({
+            'author': v['owner'], 'permlink': v['permlink'],
+            'isEmbed': True, 'isAudio': True,
+            'display_date': v.get('createdAt'),
+        })
+    candidates.sort(key=lambda v: v.get('display_date') or datetime.min, reverse=True)
+
+    # Filter to pending only (same criteria as service)
+    pending_all = []
+    for sv in candidates:
+        pair = (sv['author'], sv['permlink'])
+        if pair in exclude_pairs or pair == processing_pair:
+            continue
+        if sv['author'] in blacklisted_author_set:
+            continue
+        sv['state'] = 'prioritized' if (pair in prio_set or sv['author'] in priority_creators) else 'pending'
+        pending_all.append(sv)
+
+    total = len(pending_all)
+    skip = (page - 1) * per_page
+    items = pending_all[skip:skip + per_page]
+
+    for item in items:
+        if isinstance(item.get('display_date'), datetime):
+            item['display_date'] = item['display_date'].isoformat()
+
+    return jsonify({
+        'items': items,
+        'page': page,
+        'total': total,
         'has_more': skip + len(items) < total,
     })
 
