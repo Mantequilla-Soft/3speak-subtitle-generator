@@ -1,26 +1,26 @@
 [Unit]
 Description=3Speak metadata tagger (tags never-transcribed back-catalog from Hive metadata)
 Documentation=file:///home/tibfox/mantequilla/3speak-subtitles/src/tag_metadata.py
-After=network-online.target snap.docker.dockerd.service mongod.service
+After=network-online.target docker.service mongod.service
 Wants=network-online.target
-Requires=snap.docker.dockerd.service
+Requires=docker.service
 
 [Service]
 Type=simple
 WorkingDirectory=/home/tibfox/mantequilla/3speak-subtitles
 
 # Clear any container left behind by a hard reboot before starting a fresh one.
-ExecStartPre=-/snap/bin/docker rm -f 3speak-subtitle-metadata-tagger
+ExecStartPre=-/usr/bin/docker rm -f 3speak-subtitle-metadata-tagger
 
 # Foreground run so systemd tracks the job. --rm cleans up on exit; -T disables
 # TTY allocation (there is no terminal under systemd). tag_metadata.py is
 # resumable, so a restart after a reboot simply continues where it stopped.
-ExecStart=/snap/bin/docker compose --profile tools run --rm -T \
+ExecStart=/usr/bin/docker compose --profile tools run --rm -T \
     --name 3speak-subtitle-metadata-tagger metadata-tagger
 
 # Graceful stop: SIGTERM lets tag_metadata.py finish the current video (it traps
 # it) before exiting. Give it more than the container's 60s stop_grace_period.
-ExecStop=/snap/bin/docker stop -t 90 3speak-subtitle-metadata-tagger
+ExecStop=/usr/bin/docker stop -t 90 3speak-subtitle-metadata-tagger
 TimeoutStopSec=100
 
 # Resume on crash/daemon hiccup, but NOT on a clean exit — exit 0 means the whole

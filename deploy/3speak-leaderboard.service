@@ -1,21 +1,21 @@
 [Unit]
 Description=3Speak leaderboard stats rollup
 Documentation=file:///home/tibfox/mantequilla/3speak-subtitles/src/leaderboard_stats.py
-After=network-online.target snap.docker.dockerd.service mongod.service
+After=network-online.target docker.service mongod.service
 Wants=network-online.target
-Requires=snap.docker.dockerd.service
+Requires=docker.service
 
 [Service]
 # oneshot: the rollup runs, finishes, and exits. The .timer fires it hourly.
 Type=oneshot
 WorkingDirectory=/home/tibfox/mantequilla/3speak-subtitles
 
-ExecStartPre=-/snap/bin/docker rm -f 3speak-leaderboard
+ExecStartPre=-/usr/bin/docker rm -f 3speak-leaderboard
 # --full, not --days: a video uploaded years ago can be TAGGED today (the
 # back-catalog tagger is still running), and its topic row belongs to its upload
 # day — which an incremental window would never revisit. A full rebuild is only
 # ~40s because it never touches the 7.2M-row `views` collection.
-ExecStart=/snap/bin/docker compose --profile tools run --rm -T \
+ExecStart=/usr/bin/docker compose --profile tools run --rm -T \
     --name 3speak-leaderboard leaderboard \
     python -u src/leaderboard_stats.py --full
 
