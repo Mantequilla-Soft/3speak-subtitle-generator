@@ -19,17 +19,208 @@ services:
       - ENABLE_IPFS_PIN=true
       # Set to "true" to also pin each subtitle CID on the remote node (requires ENABLE_IPFS_PIN=true)
       - ENABLE_REMOTE_PIN=true
-      # Remote IPFS pin endpoint called when ENABLE_REMOTE_PIN=true
-      - REMOTE_PIN_URL=https://ipfs.3speak.tv/api/v0/pin/add
+      # Remote IPFS pin endpoint called when ENABLE_REMOTE_PIN=true.
+      # Pin DIRECTLY to the supernode's API — the public ipfs.3speak.tv domain is
+      # behind a proxy that times out slow pin/add calls (whole outage in 2026-07);
+      # the supernode's pull-zone then serves the pinned CID publicly. Our node is
+      # peered to it (Peering) so small subtitle files fetch in <1s.
+      - REMOTE_PIN_URL=http://65.21.201.94:5002/api/v0/pin/add
       # Set to "true" to write subtitles and tags to MongoDB
       - ENABLE_MONGO_WRITE=true
       # Only process videos created on or after this date (YYYY-MM-DD). Leave empty to process all.
       - START_DATE=2026-02-18
+      # Override start date for embed-audio only (to backfill older audio without reprocessing legacy videos)
+      - AUDIO_START_DATE=2025-11-01
       # When set to "owner/permlink", process only that one video (overrides start date)
       - PROCESS_ONLY=
     restart: unless-stopped
     mem_limit: 16g
     cpus: 16
+
+  # One-shot re-tagging of already-processed videos. Behind the "tools" profile
+  # so `docker compose up -d` never starts it; run it explicitly:
+  #
+  #   ./manage.sh retag-dry     # inspect the diff, writes nothing
+  #   ./manage.sh retag         # detached; survives SSH logout
+  #   ./manage.sh retag-logs    # follow progress
+  #
+  # Safe to interrupt: --only-stale means a restart resumes where it stopped.
+  # Given fewer CPUs than the generator so the live pipeline keeps priority.
+  retagger:
+    build: .
+    container_name: 3speak-subtitle-retagger
+    profiles: ["tools"]
+    network_mode: host
+    volumes:
+      - ./models:/app/models
+      - ./config.yaml:/app/config.yaml
+      - ./src:/app/src
+      # Read-only: retag reuses the locally-saved .srt transcripts as classifier
+      # input. Without this mount the SRT fallback finds nothing and silently
+      # degrades to metadata-only tagging.
+      - ./subtitles:/app/subtitles:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TRANSFORMERS_CACHE=/app/models
+      - HF_HOME=/app/models
+      - OMP_NUM_THREADS=6
+    command: ["python", "-u", "src/retag.py", "--all", "--fetch-missing", "--only-stale"]
+    restart: "no"
+    # `docker stop` sends SIGTERM then SIGKILLs after this. retag.py catches
+    # SIGTERM and exits after the current video (~5s, longer if a Hive API call
+    # is in flight), so the 10s default would often kill it mid-video instead.
+    stop_grace_period: 60s
+    mem_limit: 8g
+    cpus: 6
+
+  # One-shot backfill for src/backfill_hls_gap.py: legacy videos the
+  # 2026-06 to 2026-08-10 selection-query bug skipped entirely (see the
+  # script docstring). Full pipeline — transcribe/translate/tag/pin/write —
+  # so it needs the same models and write-enabling flags as the live
+  # generator, just fewer CPUs so the live pipeline keeps priority.
+  #
+  #   ./manage.sh backfill-hls-gap-dry   # inspect the backlog, writes nothing
+  #   ./manage.sh backfill-hls-gap       # detached; survives SSH logout
+  #   ./manage.sh backfill-hls-gap-logs  # follow progress
+  #
+  # Safe to interrupt: a restart re-derives the backlog from Mongo and skips
+  # anything a prior run already completed.
+  hls-gap-backfill:
+    build: .
+    container_name: 3speak-subtitle-hls-gap-backfill
+    profiles: ["tools"]
+    network_mode: host
+    volumes:
+      - ./models:/app/models
+      - ./temp:/app/temp
+      - ./subtitles:/app/subtitles
+      - ./config.yaml:/app/config.yaml
+      - ./src:/app/src
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TRANSFORMERS_CACHE=/app/models
+      - HF_HOME=/app/models
+      - ENABLE_LOCAL_SAVE=true
+      - ENABLE_IPFS_PIN=true
+      - ENABLE_REMOTE_PIN=true
+      - REMOTE_PIN_URL=http://65.21.201.94:5002/api/v0/pin/add
+      - ENABLE_MONGO_WRITE=true
+      - OMP_NUM_THREADS=6
+    command: ["python", "-u", "src/backfill_hls_gap.py", "--since", "2026-02-18"]
+    restart: "no"
+    # Same reasoning as retagger: SIGTERM finishes the current video, so give
+    # it longer than the 10s default before SIGKILL.
+    stop_grace_period: 60s
+    mem_limit: 14g
+    cpus: 6
+
+  # Detached re-tag of currently-untagged videos that DO have a transcript,
+  # reusing the local .srt. Separate service (not `retagger`) so it can run
+  # `up -d` with its own --only-empty command and survive SSH logout.
+  #
+  #   ./manage.sh retag-empty        # detached; survives logout
+  #   ./manage.sh retag-empty-logs   # follow progress
+  #
+  empty-retagger:
+    build: .
+    container_name: 3speak-subtitle-empty-retagger
+    profiles: ["tools"]
+    network_mode: host
+    volumes:
+      - ./models:/app/models
+      - ./config.yaml:/app/config.yaml
+      - ./src:/app/src
+      - ./subtitles:/app/subtitles:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TRANSFORMERS_CACHE=/app/models
+      - HF_HOME=/app/models
+      - OMP_NUM_THREADS=6
+    command: ["python", "-u", "src/retag.py", "--only-empty", "--all",
+              "--fetch-missing", "--min-content-words", "50"]
+    restart: "no"
+    stop_grace_period: 60s
+    mem_limit: 8g
+    cpus: 6
+
+  # Tags the never-transcribed back-catalog from Hive metadata alone (title,
+  # body, tags) — no transcription. Newest-first, in date windows, so it paces
+  # the load and can be stopped/resumed at any point. Behind the "tools" profile.
+  #
+  #   ./manage.sh tag-meta-dry     # preview one recent window
+  #   ./manage.sh tag-meta         # detached full run, newest -> oldest
+  #   ./manage.sh tag-meta-logs    # follow progress
+  #
+  # Fewer CPUs than the live generator so transcription keeps priority.
+  metadata-tagger:
+    build: .
+    container_name: 3speak-subtitle-metadata-tagger
+    profiles: ["tools"]
+    network_mode: host
+    volumes:
+      - ./models:/app/models
+      - ./config.yaml:/app/config.yaml
+      - ./src:/app/src
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TRANSFORMERS_CACHE=/app/models
+      - HF_HOME=/app/models
+      - OMP_NUM_THREADS=10
+    # No --fetch-missing by default: legacy metadata (title/tags/body) is stored
+    # locally and rich, so the bulk run needs zero external Hive calls. Add
+    # --fetch-missing only for a targeted embed pass where local docs are thin.
+    command: ["python", "-u", "src/tag_metadata.py", "--window-days", "30",
+              "--sleep", "0.05"]
+    restart: "no"
+    stop_grace_period: 60s
+    mem_limit: 12g
+    # 10 of 24 cores. At cpus:4 this ran ~5 videos/min (~18 days for the
+    # catalog); the box sits near 40% so the live generator keeps ample headroom.
+    cpus: 10
+
+  # Tag administration: manual overrides and community rules. No model is loaded
+  # — these are dictionary lookups and Mongo writes — so it starts in a second.
+  # Kept separate from `leaderboard` (stats) and the taggers (which load bart).
+  #
+  #   ./manage.sh set-tags <url> gaming,music
+  #   ./manage.sh community-rules --dry-run
+  #
+  tagtools:
+    build: .
+    container_name: 3speak-tagtools
+    profiles: ["tools"]
+    network_mode: host
+    volumes:
+      - ./config.yaml:/app/config.yaml
+      - ./src:/app/src
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: "no"
+    mem_limit: 1g
+    cpus: 1
+
+  # Leaderboard stats rollup. Cheap: it never touches the 7.2M-row `views`
+  # collection — watch time comes from `view-durations` only. Fired hourly by
+  # deploy/3speak-leaderboard.timer; see deploy/README.md.
+  #
+  #   ./manage.sh leaderboard-build   # first run: full history rebuild
+  #   ./manage.sh leaderboard         # refresh recent days now
+  #   ./manage.sh leaderboard-top     # print the current board
+  #
+  leaderboard:
+    build: .
+    container_name: 3speak-leaderboard
+    profiles: ["tools"]
+    network_mode: host
+    volumes:
+      - ./config.yaml:/app/config.yaml
+      - ./src:/app/src
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: ["python", "-u", "src/leaderboard_stats.py", "--full"]
+    restart: "no"
+    mem_limit: 3g
+    cpus: 2
 
   dashboard:
     build: ./dashboard
@@ -46,3 +237,58 @@ services:
     restart: unless-stopped
     mem_limit: 256m
     cpus: 1
+
+  # v2 fusion tagger (TAXONOMY_V2.md): dual-tags videos — the live v1 pipeline
+  # keeps owning tags/tags_list, v2 results land in the *_v2 fields. Each cycle
+  # it takes the 500 newest videos still lacking v2 tags (new uploads first,
+  # then down through 6 years of legacy backlog), tags them, and marks dead-IPFS
+  # media with unavailableOnTagging so it is never re-fetched. First start
+  # downloads CLIP (~600MB) into ./models once.
+  #
+  #   docker compose --profile tools up -d --build tagger-v2
+  tagger-v2:
+    build: .
+    container_name: 3speak-tagger-v2
+    profiles: ["tools"]
+    network_mode: host
+    volumes:
+      - ./models:/app/models
+      - ./config.yaml:/app/config.yaml
+      - ./src:/app/src
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TRANSFORMERS_CACHE=/app/models
+      - HF_HOME=/app/models
+      - OMP_NUM_THREADS=8
+    command: ["python", "-u", "src/tag_videos_v2.py", "--watch", "900",
+              "--legacy-since", "2020-07-17", "--limit", "500", "--sleep", "0.05",
+              "--mark-empty"]
+    restart: unless-stopped
+    stop_grace_period: 60s
+    mem_limit: 10g
+    cpus: 8
+
+  # AI-generated content flag (TAXONOMY_V2.md's "AI-made" facet): backfills
+  # `ai_generated_v2` for videos that already have v2 topic tags, since the
+  # tagger-v2 worklist above is gated on tags_list_v2 being ABSENT and so
+  # never revisits them. New videos going forward get the flag directly from
+  # tag_videos_v2.py / tag_live_v2.py — this is only the one-shot catch-up for
+  # embed-video + the legacy `videos` collection, ~3 years back. Metadata-only
+  # (title/description/Hive tags) — no model, no IPFS fetch, cheap to --watch.
+  #
+  #   docker compose --profile tools up -d --build ai-flag-backfill
+  ai-flag-backfill:
+    build: .
+    container_name: 3speak-ai-flag-backfill
+    profiles: ["tools"]
+    network_mode: host
+    volumes:
+      - ./config.yaml:/app/config.yaml
+      - ./src:/app/src
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: ["python", "-u", "src/backfill_ai_flag.py", "--watch", "3600", "--sleep", "0.02"]
+    restart: unless-stopped
+    stop_grace_period: 30s
+    mem_limit: 1g
+    cpus: 2

@@ -8,6 +8,7 @@ mongodb:
   collection_embed: ""
   collection_subtitles: ""
   collection_tags: ""
+  collection_premium: ""  # users with .premium=true here get extra languages + queue priority
 
 # IPFS Configuration
 ipfs:
@@ -58,6 +59,29 @@ languages:
     name: "Arabic"
   - code: "hi"
     name: "Hindi"
+  - code: "ko"
+    name: "Korean"
+
+# Extra languages generated only for premium users (10 most-spoken outside the default list)
+premium_languages:
+  - code: "zh"
+    name: "Chinese (Mandarin)"
+  - code: "ar"
+    name: "Arabic"
+  - code: "pt"
+    name: "Portuguese"
+  - code: "bn"
+    name: "Bengali"
+  - code: "id"
+    name: "Indonesian"
+  - code: "ur"
+    name: "Urdu"
+  - code: "ru"
+    name: "Russian"
+  - code: "ja"
+    name: "Japanese"
+  - code: "tr"
+    name: "Turkish"
   - code: "ko"
     name: "Korean"
 

@@ -5,10 +5,21 @@ Handles speech-to-text transcription using faster-whisper with batched inference
 
 import re
 import logging
+import subprocess
 from typing import List, Dict, Any, Optional
 from faster_whisper import WhisperModel, BatchedInferencePipeline
 
 logger = logging.getLogger(__name__)
+
+
+class NoAudioError(Exception):
+    """Raised when a video file has no audio stream."""
+    pass
+
+
+class NoSpeechError(Exception):
+    """Raised when no speech is detected in the audio."""
+    pass
 
 
 class Segment:
@@ -50,6 +61,20 @@ class Transcriber:
             logger.error(f"Failed to load Whisper model: {e}")
             raise
 
+    @staticmethod
+    def has_audio_stream(video_path: str) -> bool:
+        """Check if the video file contains an audio stream using ffprobe."""
+        try:
+            result = subprocess.run(
+                ['ffprobe', '-v', 'quiet', '-select_streams', 'a',
+                 '-show_entries', 'stream=index', '-of', 'csv=p=0', video_path],
+                capture_output=True, text=True, timeout=30
+            )
+            return bool(result.stdout.strip())
+        except Exception as e:
+            logger.warning(f"ffprobe check failed: {e}, assuming audio exists")
+            return True
+
     def transcribe(self, video_path: str, language: str = None,
                    allowed_languages: set = None,
                    hotwords: List[str] = None) -> tuple[List[Segment], str]:
@@ -65,7 +90,15 @@ class Transcriber:
 
         Returns:
             Tuple of (list of segments, detected language)
+
+        Raises:
+            NoAudioError: If the video has no audio stream
+            NoSpeechError: If no speech is detected (VAD removes everything)
         """
+        # Check for audio stream before attempting transcription
+        if not self.has_audio_stream(video_path):
+            raise NoAudioError(f"No audio stream found in {video_path}")
+
         try:
             logger.info(f"Starting transcription: {video_path}"
                         + (f" (forced language: {language})" if language else ""))
@@ -114,9 +147,38 @@ class Transcriber:
                         text=segment.text,
                     ))
 
+            # If VAD removed all audio, retry with a more permissive VAD threshold
+            # (covers quiet/background speech that the default 0.5 threshold rejected)
+            if not segments and transcribe_kwargs.get('vad_filter', True) is not False:
+                logger.warning("VAD produced 0 segments, retrying with permissive VAD threshold...")
+                transcribe_kwargs['vad_parameters'] = dict(
+                    threshold=0.1,
+                    min_speech_duration_ms=100,
+                    min_silence_duration_ms=500,
+                )
+                segments_iterator, info = self.pipeline.transcribe(
+                    video_path, **transcribe_kwargs
+                )
+                detected_language = language or info.language
+                for segment in segments_iterator:
+                    words = segment.words if segment.words else []
+                    if len(words) > max_words:
+                        segments.extend(self._split_segment(words, max_words))
+                    else:
+                        segments.append(Segment(
+                            start=segment.start,
+                            end=segment.end,
+                            text=segment.text,
+                        ))
+
+            if not segments:
+                raise NoSpeechError(f"No speech detected in {video_path}")
+
             logger.info(f"Transcription complete: {len(segments)} segments")
             return segments, detected_language
 
+        except (NoAudioError, NoSpeechError):
+            raise
         except Exception as e:
             logger.error(f"Transcription failed: {e}")
             raise

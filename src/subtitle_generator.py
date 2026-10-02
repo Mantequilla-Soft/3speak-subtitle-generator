@@ -4,9 +4,10 @@ Handles SRT subtitle file generation with timestamp preservation
 """
 
 import os
+import json
 import logging
 import re
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -160,6 +161,46 @@ class SubtitleGenerator:
         except Exception as e:
             logger.error(f"SRT validation failed: {e}")
             return False
+
+    def create_meta_path(self, author: str, permlink: str) -> str:
+        """Path to the per-video metadata JSON (summary + title translations)."""
+        author_dir = self.output_dir / author
+        author_dir.mkdir(exist_ok=True)
+        return str(author_dir / f"{permlink}.meta.json")
+
+    def write_meta(self, author: str, permlink: str,
+                   summary_en: Optional[str], title_translations: Optional[Dict[str, str]],
+                   hive_permlink: Optional[str] = None) -> bool:
+        """
+        Write a .meta.json containing the saved summary + title translations.
+        If `hive_permlink` is provided and differs from `permlink`, also create a
+        symlink alias for the public-facing URL (same pattern as the SRT mirror).
+        Returns True if a file was written, False if nothing to write.
+        """
+        if not summary_en and not title_translations:
+            return False
+        meta_path = self.create_meta_path(author, permlink)
+        payload: Dict[str, Any] = {}
+        if summary_en:
+            payload['summary_en'] = summary_en
+        if title_translations:
+            payload['title_translations'] = title_translations
+        try:
+            with open(meta_path, 'w', encoding='utf-8') as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+        except OSError as e:
+            logger.warning(f"Failed to write meta {meta_path}: {e}")
+            return False
+
+        if hive_permlink and hive_permlink != permlink:
+            alias_path = self.create_meta_path(author, hive_permlink)
+            try:
+                if os.path.lexists(alias_path):
+                    os.remove(alias_path)
+                os.symlink(os.path.basename(meta_path), alias_path)
+            except OSError as e:
+                logger.warning(f"Could not create meta alias {alias_path}: {e}")
+        return True
 
     def create_subtitle_path(self, author: str, permlink: str, language: str) -> str:
         """
