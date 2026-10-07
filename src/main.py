@@ -366,7 +366,7 @@ class SubtitleService:
                     if self.enable_ipfs_pin:
                         meta_cid = self.ipfs_fetcher.add_to_ipfs(meta_path)
                         if meta_cid and self.enable_remote_pin:
-                            self.ipfs_fetcher.pin_remote(meta_cid, self.remote_pin_url)
+                            self.ipfs_fetcher.pin_remote(meta_cid, self.remote_pin_url, meta_path)
                         if meta_cid and self.enable_mongo_write:
                             self.db.save_meta_cid(author, permlink, meta_cid, video_type=video_type)
                             logger.info(f"  Meta pinned: {meta_cid}")
@@ -443,7 +443,7 @@ class SubtitleService:
                             subtitle_cid = self.ipfs_fetcher.add_to_ipfs(subtitle_path)
                             if subtitle_cid and self.enable_remote_pin:
                                 remote_ok = self.ipfs_fetcher.pin_remote(
-                                    subtitle_cid, self.remote_pin_url)
+                                    subtitle_cid, self.remote_pin_url, subtitle_path)
 
                         # Save to MongoDB
                         if self.enable_mongo_write and subtitle_cid:

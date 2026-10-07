@@ -224,7 +224,7 @@ def main():
                     meta_cid = ipfs.add_to_ipfs(str(meta_path))
                     if meta_cid:
                         if enable_remote_pin:
-                            ipfs.pin_remote(meta_cid, remote_pin_url)
+                            ipfs.pin_remote(meta_cid, remote_pin_url, str(meta_path))
                         db.save_meta_cid(author, permlink, meta_cid, video_type=video_type)
                         logger.info(f"  {author}/{permlink}: meta pinned ({meta_cid})")
             skipped_done += 1
@@ -311,7 +311,7 @@ def main():
                         meta_cid = ipfs.add_to_ipfs(str(meta_path))
                         if meta_cid:
                             if enable_remote_pin:
-                                ipfs.pin_remote(meta_cid, remote_pin_url)
+                                ipfs.pin_remote(meta_cid, remote_pin_url, str(meta_path))
                             db.save_meta_cid(author, permlink, meta_cid, video_type=video_type)
                             logger.info(f"  Meta pinned: {meta_cid}")
             except Exception as e:

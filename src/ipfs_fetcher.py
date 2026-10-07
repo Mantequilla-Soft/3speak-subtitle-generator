@@ -191,24 +191,47 @@ class IPFSFetcher:
             logger.error(f"Failed to add {file_path} to IPFS: {e}")
             return None
 
-    def pin_remote(self, cid: str, remote_url: str) -> bool:
+    def pin_remote(self, cid: str, remote_url: str,
+                   file_path: Optional[str] = None) -> bool:
         """
-        Pin a CID on a remote IPFS node.
+        Get a CID pinned on a remote IPFS node.
+
+        With file_path, the file itself is uploaded to the remote's /add
+        (derived from remote_url) instead of pin-by-CID. Pin-by-CID makes the
+        supernode fetch the blocks from us over bitswap, which silently stalls
+        (2026-09/10: ~1.4k subtitles never reached the gateway). Same bytes and
+        CIDv0 -> same CID, which is checked.
 
         Args:
-            cid: The IPFS CID to pin.
-            remote_url: Full base URL of the remote pin endpoint
-                        (e.g. https://ipfs.3speak.tv/api/v0/pin/add)
+            cid: The IPFS CID to pin (as returned by our local add).
+            remote_url: Full URL of the remote pin endpoint
+                        (e.g. http://65.21.201.94:5002/api/v0/pin/add)
+            file_path: Local file whose content is `cid`.
 
         Returns:
-            True if the remote accepted the pin.
+            True if the remote now holds the CID pinned.
         """
         try:
-            response = requests.post(
-                f"{remote_url}?arg={cid}",
-                timeout=30
-            )
-            response.raise_for_status()
+            if file_path:
+                add_url = remote_url.replace('/pin/add', '/add')
+                with open(file_path, 'rb') as f:
+                    response = requests.post(
+                        f"{add_url}?pin=true&cid-version=0",
+                        files={'file': f},
+                        timeout=60
+                    )
+                response.raise_for_status()
+                remote_cid = response.json().get('Hash')
+                if remote_cid != cid:
+                    logger.warning(f"Remote add CID mismatch for {os.path.basename(file_path)}: "
+                                   f"local {cid}, remote {remote_cid}")
+                    return False
+            else:
+                response = requests.post(
+                    f"{remote_url}?arg={cid}",
+                    timeout=30
+                )
+                response.raise_for_status()
             logger.info(f"Pinned remotely: {cid}")
             return True
         except Exception as e:
