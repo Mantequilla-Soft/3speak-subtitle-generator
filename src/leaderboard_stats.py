@@ -17,6 +17,11 @@ Computes, per user per UTC day:
     boost_amount_received  summed amount of those boosts
     boosts_given           boosts they sent to OTHER streamers
     boost_amount_given     summed amount of those
+    story_uploads          24h Stories they posted (also counted in short_uploads)
+
+The board also carries `story_streak`, the longest run of consecutive UTC days
+with a story inside the window. It is not a daily metric — it is derived from
+the days whose story_uploads > 0 when the windows are rebuilt.
 
 Written to two collections, both owned by this project (we never write to
 3Speak's own collections):
@@ -67,7 +72,11 @@ METRICS = ('video_uploads', 'short_uploads',
            'video_watch_secs', 'short_watch_secs', 'tags_given',
            'streams', 'stream_secs', 'stream_peak_viewers', 'stream_viewers',
            'boosts_received', 'boost_amount_received',
-           'boosts_given', 'boost_amount_given')
+           'boosts_given', 'boost_amount_given', 'story_uploads')
+
+# Board-only columns: computed per window from the daily rows rather than
+# rolled up with $sum/$max, so they never appear in leaderboard-daily.
+WINDOW_METRICS = ('story_streak',)
 
 # Metrics that roll up with $max instead of $sum. `peakViewers` is a
 # high-water mark: a creator who peaked at 12 on Monday and 9 on Tuesday peaked
@@ -208,6 +217,17 @@ def norm_user(name):
     normalise rather than trust.
     """
     return name.strip().lower() if isinstance(name, str) and name.strip() else None
+
+
+def longest_streak(days):
+    """Longest run of consecutive calendar days in an iterable of day buckets."""
+    best = run = 0
+    prev = None
+    for day in sorted(set(days)):
+        run = run + 1 if prev is not None and day - prev == timedelta(days=1) else 1
+        best = max(best, run)
+        prev = day
+    return best
 
 
 def load_stream_hosts(db):
@@ -425,6 +445,22 @@ def collect(db, since):
                 f"{f', {selfboost} self-boosts skipped' if selfboost else ''}"
                 f"{f', {orphan} with no resolvable host (sender still credited)' if orphan else ''}")
 
+    # --- 8: stories ---------------------------------------------------------
+    # Stories are shorts, so they already count in short_uploads above; this is
+    # the extra story-only column. Counted on `story_posted_at`, which the
+    # checker sets once and never clears — `story` flips back to false when a
+    # creator keeps a story as a plain short, and that should still count as a
+    # story they posted. Bucketed on the day it was posted, not createdAt.
+    story_q = {'status': 'published', 'story_posted_at': {'$type': 'date'}}
+    if since:
+        story_q['story_posted_at'] = {'$gte': since}
+
+    n = 0
+    for v in db['embed-video'].find(story_q, {'owner': 1, 'story_posted_at': 1, '_id': 0}):
+        bump(norm_user(v.get('owner')), day_of(v.get('story_posted_at')), 'story_uploads')
+        n += 1
+    logger.info(f"stories scanned: {n}")
+
     logger.info(f"topic rows built: {len(topic_stats)}")
 
     return stats, topic_stats, topic_stats_v2
@@ -595,6 +631,13 @@ def rebuild_windows(db, now):
         })
 
         rows = list(daily.aggregate(pipeline))
+
+        story_days = defaultdict(list)
+        for d in daily.find({**match, 'story_uploads': {'$gt': 0}},
+                            {'user': 1, 'date': 1, '_id': 0}):
+            story_days[d.get('user')].append(d.get('date'))
+        streaks = {u: longest_streak(days) for u, days in story_days.items()}
+
         ops = []
         live_users = []
         for r in rows:
@@ -612,6 +655,7 @@ def rebuild_windows(db, now):
                           # rows that all predate a metric yields null, and a
                           # null column would break the UI's sort.
                           **{m: r.get(m) or 0 for m in METRICS},
+                          'story_streak': streaks.get(user, 0),
                           'from': start, 'to': day_of(now),
                           'updated_at': utcnow()}},
                 upsert=True,
@@ -635,6 +679,11 @@ def ensure_indexes(db):
     # One index per metric so the UI can sort the board by any column fast.
     for m in METRICS:
         db['leaderboard'].create_index([('window', ASCENDING), (m, DESCENDING)])
+    # The story boards were specced with `user` as a tiebreaker — streaks tie a
+    # lot (everyone at 1), and this keeps the order stable without a sort.
+    for m in ('story_uploads',) + WINDOW_METRICS:
+        db['leaderboard'].create_index(
+            [('window', ASCENDING), (m, DESCENDING), ('user', ASCENDING)])
 
     # Same index set for v1 ('') and the faceted taxonomy ('-v2').
     for suffix in ('', '-v2'):

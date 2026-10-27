@@ -7,8 +7,12 @@ blockstore — but the .srt files are still on disk. So recovery is:
 
   1. re-ADD the on-disk .srt to our local node -> restores the exact CID
      (content-addressed) and pins it locally again
-  2. PIN that CID on the supernode's API directly -> the supernode fetches it
-     over our peered link and its pull-zone serves it publicly
+  2. ADD the same file on the supernode's API directly -> same CID, pinned
+     there, and its pull-zone serves it publicly. (Pin-by-CID made the
+     supernode fetch from us over bitswap, which stalls — 2026-10.)
+
+--failed re-pushes only docs flagged remote_pin_failed (any date) and clears
+the flag on success.
 
 Scoped to the affected window (default: subtitles touched on/after --since) so it
 doesn't re-do the older ones that are already fine. Idempotent, parallel,
@@ -16,6 +20,7 @@ resumable — a failed CID is logged, not retried forever.
 
     python3 src/recover_subtitles.py --dry-run --since 2026-03-25
     python3 src/recover_subtitles.py --since 2026-03-25 --workers 12
+    python3 src/recover_subtitles.py --failed --workers 8
 """
 
 import argparse
@@ -36,7 +41,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 LOCAL_ADD = os.getenv('LOCAL_ADD', 'http://127.0.0.1:5001/api/v0/add')
-PIN_API = os.getenv('PIN_API', 'http://65.21.201.94:5002/api/v0/pin/add')
+REMOTE_ADD = os.getenv('REMOTE_ADD', 'http://65.21.201.94:5002/api/v0/add')
 # on the host the files live in the repo; in a container they are at /app/subtitles
 SUB_DIR = os.getenv('SUB_DIR', os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), 'subtitles'))
@@ -64,9 +69,13 @@ def recover_one(task):
         added = r.json().get('Hash')
         if added != cid:
             return ('mismatch', cid)
-        # 2. pin on the supernode (it fetches from us now)
-        pr = requests.post(f"{PIN_API}?arg={cid}", timeout=60)
-        return ('ok' if pr.ok else 'pinfail', cid)
+        # 2. add the same bytes on the supernode (pinned there, same CID)
+        with open(path, 'rb') as fh:
+            pr = requests.post(f"{REMOTE_ADD}?cid-version=0&pin=true",
+                               files={'file': fh}, timeout=60)
+        if not pr.ok:
+            return ('pinfail', cid)
+        return ('ok' if pr.json().get('Hash') == cid else 'mismatch', cid)
     except Exception:
         return ('pinfail', cid)
 
@@ -77,6 +86,8 @@ def main():
     ap.add_argument('--since', default='2026-03-25',
                     help='only subtitles updated on/after this date (YYYY-MM-DD)')
     ap.add_argument('--workers', type=int, default=12)
+    ap.add_argument('--failed', action='store_true',
+                    help='only CIDs flagged remote_pin_failed (ignores --since); clears the flag on success')
     ap.add_argument('--dry-run', action='store_true')
     ap.add_argument('--limit', type=int, default=0)
     args = ap.parse_args()
@@ -89,17 +100,26 @@ def main():
     since = datetime.fromisoformat(args.since)
 
     tasks = []
-    for d in db.subtitles_collection.find(
-            {'is_alias': {'$ne': True}, 'updated_at': {'$gte': since},
-             'subtitles': {'$exists': True}},
-            {'author': 1, 'permlink': 1, 'subtitles': 1, '_id': 0}).batch_size(3000):
-        for lang, cid in (d.get('subtitles') or {}).items():
-            if cid:
-                tasks.append((d['author'], d['permlink'], lang, cid))
+    if args.failed:
+        for d in db.subtitles_collection.find(
+                {'is_alias': {'$ne': True}, 'remote_pin_failed.0': {'$exists': True}},
+                {'author': 1, 'permlink': 1, 'remote_pin_failed': 1, '_id': 0}).batch_size(3000):
+            for e in d['remote_pin_failed']:
+                if e.get('cid'):
+                    tasks.append((d['author'], d['permlink'], e['lang'], e['cid']))
+    else:
+        for d in db.subtitles_collection.find(
+                {'is_alias': {'$ne': True}, 'updated_at': {'$gte': since},
+                 'subtitles': {'$exists': True}},
+                {'author': 1, 'permlink': 1, 'subtitles': 1, '_id': 0}).batch_size(3000):
+            for lang, cid in (d.get('subtitles') or {}).items():
+                if cid:
+                    tasks.append((d['author'], d['permlink'], lang, cid))
     if args.limit:
         tasks = tasks[:args.limit]
-    logger.info(f"subtitle CIDs to recover (since {args.since}): {len(tasks):,}")
-    logger.info(f"files: {SUB_DIR}  |  local add: {LOCAL_ADD}  |  pin: {PIN_API}")
+    scope = 'flagged remote_pin_failed' if args.failed else f'since {args.since}'
+    logger.info(f"subtitle CIDs to recover ({scope}): {len(tasks):,}")
+    logger.info(f"files: {SUB_DIR}  |  local add: {LOCAL_ADD}  |  remote add: {REMOTE_ADD}")
     if args.dry_run:
         present = sum(os.path.exists(os.path.join(SUB_DIR, a, f"{p}.{l}.srt"))
                       for a, p, l, _ in tasks[:200])
@@ -112,6 +132,11 @@ def main():
         for n, fut in enumerate(as_completed(futs)):
             status, _cid = fut.result()
             counts[status] += 1
+            if status == 'ok' and args.failed:
+                # primary and hive_permlink mirror both carry the flag
+                db.subtitles_collection.update_many(
+                    {'remote_pin_failed.cid': _cid},
+                    {'$pull': {'remote_pin_failed': {'cid': _cid}}})
             if n % 500 == 0:
                 logger.info(f"[{n}/{len(tasks)}] {counts}")
             if _stop:

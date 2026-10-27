@@ -21,7 +21,8 @@ from tag_live_v2 import tag_video_v2
 from subtitle_generator import SubtitleGenerator
 from summarizer import Summarizer
 from hive_client import (
-    fetch_hive_post, fetch_hive_title, parse_embed_url, filename_to_title, is_generic_title,
+    fetch_hive_post, fetch_hive_title, fetch_incubation_post,
+    parse_embed_url, filename_to_title, is_generic_title,
 )
 from video_meta import hive_reference, merge_hive_post, normalize_video_metadata
 
@@ -158,18 +159,27 @@ class SubtitleService:
             return meta
 
         author, permlink = hive_reference(video)
-        if not author or not permlink:
-            return meta
+        if author and permlink:
+            post = self.db.get_hive_meta(author, permlink)
+            if post is None:
+                post = fetch_hive_post(author, permlink)
+                if post:
+                    self.db.save_hive_meta(author, permlink, post)
+            if post:
+                return merge_hive_post(meta, post)
 
-        post = self.db.get_hive_meta(author, permlink)
-        if post is None:
-            post = fetch_hive_post(author, permlink)
-            if not post:
-                logger.debug(f"No Hive post found for @{author}/{permlink}")
-                return meta
-            self.db.save_hive_meta(author, permlink, post)
+        # No Hive post to fall back on — likely a new/incubating creator (no
+        # Hive account yet, so hive_reference() can't resolve one at all).
+        # Their real upload metadata (title/body/tags) lives in 3speak's own
+        # checker service until they graduate and the post actually goes on
+        # Hive; without this, these videos get tagged from a blank title+body.
+        owner, vpermlink = video.get('owner'), video.get('permlink')
+        if owner and vpermlink:
+            post = fetch_incubation_post(owner, vpermlink)
+            if post:
+                return merge_hive_post(meta, post)
 
-        return merge_hive_post(meta, post)
+        return meta
 
     def process_video(self, video: Dict[str, Any], is_premium: bool = False) -> bool:
         """
@@ -366,7 +376,7 @@ class SubtitleService:
                     if self.enable_ipfs_pin:
                         meta_cid = self.ipfs_fetcher.add_to_ipfs(meta_path)
                         if meta_cid and self.enable_remote_pin:
-                            self.ipfs_fetcher.pin_remote(meta_cid, self.remote_pin_url)
+                            self.ipfs_fetcher.pin_remote(meta_cid, self.remote_pin_url, meta_path)
                         if meta_cid and self.enable_mongo_write:
                             self.db.save_meta_cid(author, permlink, meta_cid, video_type=video_type)
                             logger.info(f"  Meta pinned: {meta_cid}")
@@ -443,7 +453,7 @@ class SubtitleService:
                             subtitle_cid = self.ipfs_fetcher.add_to_ipfs(subtitle_path)
                             if subtitle_cid and self.enable_remote_pin:
                                 remote_ok = self.ipfs_fetcher.pin_remote(
-                                    subtitle_cid, self.remote_pin_url)
+                                    subtitle_cid, self.remote_pin_url, subtitle_path)
 
                         # Save to MongoDB
                         if self.enable_mongo_write and subtitle_cid:

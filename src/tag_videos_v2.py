@@ -430,6 +430,13 @@ def _write_ai_flag(db, args, owner, permlink, meta):
     Idempotent: skips once already set (or manually locked), so re-running a
     pass or --watch cycle doesn't rewrite it every time. Returns True if a
     flag was (or, in --dry-run, would be) written.
+
+    Also leaves it unset (returns False) when nothing fired AND the metadata
+    itself is blank — see tag_live_v2._save_ai_flag's docstring: a video can
+    reach this before its Hive tags/title/body have synced locally, and this
+    function never revisits an already-set flag, so committing "false, no
+    evidence" here would look identical to — and permanently mask — a real
+    confident negative. Left unset, the next non-recheck pass retries it.
     """
     existing = db.tags_collection.find_one(
         {'author': owner, 'permlink': permlink},
@@ -438,6 +445,9 @@ def _write_ai_flag(db, args, owner, permlink, meta):
         return False
     is_ai, ai_evidence = v2.detect_ai_generated(
         meta['hive_tags'], meta['title'], meta['body'], author=owner)
+    has_metadata = bool(meta['title'] or meta['body'] or meta['hive_tags'])
+    if not is_ai and not has_metadata:
+        return False
     if args.dry_run:
         logger.info(f"DRY ai_generated_v2={is_ai} {owner}/{permlink} {ai_evidence}")
         return True

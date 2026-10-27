@@ -39,7 +39,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import tag_taxonomy_v2 as v2  # noqa: E402
 from db_manager import DatabaseManager  # noqa: E402
-from video_meta import normalize_video_metadata  # noqa: E402
+from hive_client import fetch_hive_post, fetch_incubation_post  # noqa: E402
+from video_meta import hive_reference, merge_hive_post, normalize_video_metadata  # noqa: E402
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
@@ -75,7 +76,13 @@ def build_worklist(db, since_date, embed_only=False, recheck=False, author=None)
         with 'manual:') — those are always left alone.
 
     Same eligibility as tag_videos_v2.build_worklist (orphan embeds and
-    hidden creators are unreachable on every frontend, so skip them too).
+    hidden creators are unreachable on every frontend, so skip them too) —
+    EXCEPT a `warmup_approved` orphan: a Hive-less ("incubating") creator's
+    upload that an admin approved on the Warm-up Review page. Those ARE
+    reachable (3speak.tv renders them straight from the checker service, no
+    Hive post needed yet — confirmed via gusna/9uvmf4h4), so excluding them
+    the same way as a genuinely dead/unlinked orphan was wrong. Small subset
+    (~13 as of 2026-10-18), so this doesn't change the worklist's scale.
     """
     raw = db.db
     flagged = set()
@@ -100,7 +107,9 @@ def build_worklist(db, since_date, embed_only=False, recheck=False, author=None)
     if since_date:
         embed_q['createdAt'] = {'$gte': since_date}
     for vdoc in db.embed_collection.find(embed_q).sort('createdAt', -1):
-        if vdoc['owner'] in hidden or (vdoc.get('hive_permlink') or '').strip() == '':
+        if vdoc['owner'] in hidden:
+            continue
+        if (vdoc.get('hive_permlink') or '').strip() == '' and not vdoc.get('warmup_approved'):
             continue
         if (vdoc['owner'], vdoc['permlink']) not in flagged:
             needs.append(vdoc)
@@ -119,11 +128,56 @@ def build_worklist(db, since_date, embed_only=False, recheck=False, author=None)
     return needs
 
 
+def _enrich_meta(db, vdoc, meta):
+    """
+    Fall back to a fetched Hive post, then 3speak's incubation API, when the
+    local doc's title/body/tags are sparse — same fallback chain as the live
+    pipeline (main.py SubtitleService._video_metadata), so a backfill/recheck
+    pass sees the same metadata a freshly-processed video would.
+
+    The Hive branch checks our own subtitles-hive-meta cache first (built by
+    backfill_hive_metadata.py), so it's a live fetch only on a cache miss —
+    not a per-video network call for the whole backlog. The incubation branch
+    only triggers when hive_reference() can't resolve an author/permlink at
+    all, i.e. the small warmup_approved-orphan subset build_worklist now
+    includes (see its docstring) — also not a broad fetch.
+    """
+    if meta['body'] and meta['hive_tags']:
+        return meta
+    author, permlink = hive_reference(vdoc)
+    if author and permlink:
+        post = db.get_hive_meta(author, permlink)
+        if post is None:
+            post = fetch_hive_post(author, permlink)
+            if post:
+                db.save_hive_meta(author, permlink, post)
+        if post:
+            return merge_hive_post(meta, post)
+    owner, vpermlink = vdoc.get('owner'), vdoc.get('permlink')
+    if owner and vpermlink:
+        post = fetch_incubation_post(owner, vpermlink)
+        if post:
+            return merge_hive_post(meta, post)
+    return meta
+
+
 def process_one(db, args, vdoc, stats):
     owner, permlink = vdoc['owner'], vdoc['permlink']
     meta = normalize_video_metadata(vdoc)
+    meta = _enrich_meta(db, vdoc, meta)
     is_ai, evidence = v2.detect_ai_generated(meta['hive_tags'], meta['title'], meta['body'],
                                            author=owner)
+
+    # _enrich_meta already tried a Hive-post + incubation fetch, so blank
+    # metadata here usually means there's genuinely nothing to find (not a
+    # sync race like the live pipeline can hit) — but on a transient fetch
+    # failure, writing "false, no evidence" would look identical to a real
+    # negative and this doc would never be retried outside --recheck. Leave
+    # it unset instead, same guard as tag_live_v2._save_ai_flag.
+    has_metadata = bool(meta['title'] or meta['body'] or meta['hive_tags'])
+    if not is_ai and not has_metadata:
+        stats['skipped_blank'] += 1
+        return
 
     line = f"{owner}/{permlink} -> ai_generated_v2={is_ai} {evidence if is_ai else ''}"
     if args.dry_run:
@@ -160,11 +214,20 @@ def run_pass(db, args, since_date):
                 f"{'recheck' if args.recheck else 'flag'}")
     if args.limit:
         work = work[:args.limit]
-    stats = {'flagged_ai': 0, 'flagged_not_ai': 0, 'skipped_manual': 0}
+    stats = {'flagged_ai': 0, 'flagged_not_ai': 0, 'skipped_manual': 0, 'skipped_blank': 0,
+             'errors': 0}
     for n, vdoc in enumerate(work):
         if _stop:
             break
-        process_one(db, args, vdoc, stats)
+        try:
+            process_one(db, args, vdoc, stats)
+        except Exception:
+            # One malformed doc (e.g. unexpected Hive json_metadata shape —
+            # see hive_client.fetch_hive_post) must not lose an hour-long
+            # pass over the other ~138k videos. Left unflagged, so it's
+            # retried (and logged again if still broken) next pass.
+            stats['errors'] += 1
+            logger.exception(f"process_one failed for {vdoc.get('owner')}/{vdoc.get('permlink')} — skipping")
         if n % 200 == 0:
             logger.info(f"[{n}/{len(work)}] {stats}")
         if args.sleep:

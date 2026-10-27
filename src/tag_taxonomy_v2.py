@@ -456,7 +456,11 @@ AI_HIVE_TAGS: Set[str] = {
     'ai', 'aiart', 'aivideo', 'aishorts', 'aianimation', 'aigenerated',
     'ai-generated', 'aicreated', 'aigenerativeart', 'artificialintelligence',
     'genai', 'generativeai', 'midjourney', 'stablediffusion', 'stable-diffusion',
-    'dalle', 'dalle2', 'dalle3', 'chatgpt', 'sora', 'soraai', 'runway',
+    'dalle', 'dalle2', 'dalle3', 'chatgpt', 'sora', 'soraai',
+    # 'runway' alone is deliberately excluded — a real, common Hive tag for
+    # fashion/catwalk content (confirmed false positive: bitjoe369's Victoria's
+    # Secret Fashion Show, tagged 'runway' for the actual runway, not RunwayML).
+    # The unambiguous tool-specific forms still catch a deliberate AI tag.
     'runwayml', 'kling', 'klingai', 'veo', 'pika', 'pikalabs', 'luma', 'lumaai',
     'heygen', 'synthesia', 'sunoai', 'suno', 'invideoai', 'leonardoai',
     'deepfake', 'aimusic',
@@ -522,6 +526,21 @@ _AI_TEXT_PATTERNS = [
     r'|trailer|character|characters|creature|creatures|monster|monsters|battle|scene)\b'
     r'(?!\s+(?:generation|generator|generators|tool|tools|editor|editing|app|apps|tutorial|course|prompt|prompts)\b)',
     r'\b(?:realistic|hyper[\s-]?realistic|cinematic)\s+ai\b',
+    # Same self-description, but written with no separator at all — "NOTE
+    # AIVideo", "AIShort" — a common creator-disclaimer style on food/ASMR
+    # shorts. No descriptor-word slack needed since there's no word boundary
+    # between "ai" and the noun to insert one into.
+    r'\bai(?:video|videos|short|shorts|animation|animations|art|artwork'
+    r'|image|images|clip|clips|movie|movies|film|films|cinema)\b',
+    # A leading "AI" label on a line — "AI - Embroidered Akaza by Hand…",
+    # "AI: …", "[AI] …", "AI | …" — the creator tagging the content itself.
+    # Line-anchored (snap bodies start with the embed URL line) so a mid-
+    # sentence "…using AI - …" doesn't count, and not followed by a word that
+    # makes it a topic heading ("AI - the future of work", "AI: news") or a
+    # link in a sources list ("AI: https://cnbc.com/...").
+    r'(?<![^\n])[ \t]*(?:[\[(]ai[\])][ \t]*|ai[ \t]*[-–—:|][ \t]+)'
+    r'(?!(?:the|a|an|and|in|for|of|is|are|vs|news|tools?|tutorial|course|update|explained)\b'
+    r'|https?://|www\.)',
     r'\bartificial intelligence\b(?:[^.]{0,20})\b(?:generated|created|made)\b',
     # A named generator tied to a generation verb or credit line — a bare
     # tool mention still doesn't count (see note above). Plain "InVideo" is

@@ -100,6 +100,11 @@ def fetch_hive_post(author: str, permlink: str, timeout: int = 10) -> Optional[D
     tags = []
     try:
         meta = json.loads(result.get('json_metadata') or '{}')
+        # A minority of posts have double-encoded json_metadata (a JSON string
+        # literal containing JSON), which parses once into a plain str rather
+        # than a dict — .get() on that would crash a bulk caller mid-pass.
+        if not isinstance(meta, dict):
+            meta = {}
         raw = meta.get('tags') or []
         if isinstance(raw, list):
             tags = [str(t) for t in raw if t]
@@ -113,6 +118,60 @@ def fetch_hive_post(author: str, permlink: str, timeout: int = 10) -> Optional[D
         'category': (result.get('category') or '').strip(),
     }
     _post_cache[key] = post
+    return post
+
+
+INCUBATION_POST_URL = 'https://checker.3speak.tv/incubation/post/{owner}/{permlink}'
+_incubation_cache: dict = {}
+
+
+def fetch_incubation_post(owner: str, permlink: str, timeout: int = 8) -> Optional[Dict[str, Any]]:
+    """
+    Title, body, tags and category for a video from a creator who hasn't
+    reached Hive yet ("incubating" accounts — see curation admin's Warm-up
+    Review). These videos have no hive_author/hive_permlink, so
+    hive_reference() can't resolve them and fetch_hive_post() is never even
+    tried; the upload's real metadata (what the creator actually entered,
+    including tags) lives only in 3speak's own checker service until the
+    account graduates to Hive and the post is actually broadcast.
+
+    Same return shape as fetch_hive_post() — {title, body, tags, category} —
+    so callers can merge_hive_post() either one interchangeably. Cached per-
+    process. Returns None on any failure (not incubating, not found, network
+    error) so callers degrade the same way as a missing Hive post.
+    """
+    if not owner or not permlink:
+        return None
+    key = f"{owner}/{permlink}"
+    if key in _incubation_cache:
+        return _incubation_cache[key]
+
+    try:
+        resp = requests.get(
+            INCUBATION_POST_URL.format(owner=owner, permlink=permlink),
+            timeout=timeout,
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json() or {}
+    except Exception as e:
+        logger.debug(f"incubation fetch failed for {key}: {e}")
+        return None
+
+    item = data.get('post') or {}
+    if not item:
+        return None
+    meta = item.get('jsonMetadata') or {}
+    raw_tags = meta.get('tags') or []
+    tags = [str(t) for t in raw_tags if t] if isinstance(raw_tags, list) else []
+
+    post = {
+        'title': (item.get('title') or '').strip(),
+        'body': item.get('body') or '',
+        'tags': tags,
+        'category': (item.get('parentPermlink') or '').strip(),
+    }
+    _incubation_cache[key] = post
     return post
 
 
