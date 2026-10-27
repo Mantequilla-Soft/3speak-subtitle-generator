@@ -49,7 +49,7 @@ show "as of".
 
 ## 3. The columns
 
-All 13 are present on **every** board row, always a number, never null or
+All 15 are present on **every** board row, always a number, never null or
 missing. A creator with no activity for a metric has `0`.
 
 ### Video
@@ -79,6 +79,13 @@ missing. A creator with no activity for a metric has `0`.
 | `boost_amount_received` | summed amount of those |
 | `boosts_given` | boosts they sent to **other** streamers |
 | `boost_amount_given` | summed amount of those |
+
+### Stories
+
+| field | meaning |
+|---|---|
+| `story_uploads` | 24h Stories posted, by `story_posted_at` — still counted if later kept as a short. Stories **also** count in `short_uploads` |
+| `story_streak` | longest run of consecutive UTC days with ≥1 story **inside the window** — so `7d` maxes at 7, `all` is the all-time best. Board-only: not in `leaderboard-daily` (derive it from days with `story_uploads > 0`) |
 
 ---
 
