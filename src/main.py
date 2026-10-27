@@ -21,7 +21,8 @@ from tag_live_v2 import tag_video_v2
 from subtitle_generator import SubtitleGenerator
 from summarizer import Summarizer
 from hive_client import (
-    fetch_hive_post, fetch_hive_title, parse_embed_url, filename_to_title, is_generic_title,
+    fetch_hive_post, fetch_hive_title, fetch_incubation_post,
+    parse_embed_url, filename_to_title, is_generic_title,
 )
 from video_meta import hive_reference, merge_hive_post, normalize_video_metadata
 
@@ -158,18 +159,27 @@ class SubtitleService:
             return meta
 
         author, permlink = hive_reference(video)
-        if not author or not permlink:
-            return meta
+        if author and permlink:
+            post = self.db.get_hive_meta(author, permlink)
+            if post is None:
+                post = fetch_hive_post(author, permlink)
+                if post:
+                    self.db.save_hive_meta(author, permlink, post)
+            if post:
+                return merge_hive_post(meta, post)
 
-        post = self.db.get_hive_meta(author, permlink)
-        if post is None:
-            post = fetch_hive_post(author, permlink)
-            if not post:
-                logger.debug(f"No Hive post found for @{author}/{permlink}")
-                return meta
-            self.db.save_hive_meta(author, permlink, post)
+        # No Hive post to fall back on — likely a new/incubating creator (no
+        # Hive account yet, so hive_reference() can't resolve one at all).
+        # Their real upload metadata (title/body/tags) lives in 3speak's own
+        # checker service until they graduate and the post actually goes on
+        # Hive; without this, these videos get tagged from a blank title+body.
+        owner, vpermlink = video.get('owner'), video.get('permlink')
+        if owner and vpermlink:
+            post = fetch_incubation_post(owner, vpermlink)
+            if post:
+                return merge_hive_post(meta, post)
 
-        return merge_hive_post(meta, post)
+        return meta
 
     def process_video(self, video: Dict[str, Any], is_premium: bool = False) -> bool:
         """

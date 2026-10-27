@@ -119,6 +119,16 @@ def _save_ai_flag(db, author: str, permlink: str, metadata: Dict[str, Any]) -> N
 
     Skips silently once already set, so it never overwrites a later manual
     correction and a re-run stays cheap.
+
+    Also skips (writes nothing) when the metadata itself is essentially blank
+    AND nothing fired — Hive tags/title/body sometimes aren't synced into the
+    local doc yet this soon after upload (confirmed: aktham999ua's video was
+    AI-flag-checked at 12:38:55, 26s *before* hive_link_checked_at finished).
+    Committing "false, no evidence" in that case looks identical to a real
+    confident negative but is really "nothing to look at yet", and — because
+    this function never revisits an already-set flag — would otherwise lock
+    in a wrong answer forever. Leaving it unset lets the batch backfill's
+    normal (non-recheck) pass pick it up once real metadata has landed.
     """
     existing = db.tags_collection.find_one(
         {'author': author, 'permlink': permlink},
@@ -128,6 +138,10 @@ def _save_ai_flag(db, author: str, permlink: str, metadata: Dict[str, Any]) -> N
     is_ai, ai_evidence = v2.detect_ai_generated(
         metadata.get('hive_tags'), metadata.get('title'), metadata.get('body'),
         author=author)
+    has_metadata = bool(metadata.get('title') or metadata.get('body')
+                        or metadata.get('hive_tags'))
+    if not is_ai and not has_metadata:
+        return
     db.tags_collection.update_one(
         {'author': author, 'permlink': permlink},
         {'$set': {
